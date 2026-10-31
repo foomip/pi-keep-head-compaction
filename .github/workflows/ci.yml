@@ -5,15 +5,53 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  typecheck:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm test
+      - name: Coverage
+        run: npm run coverage
+      - name: Summarize coverage
+        if: always()
+        run: |
+          if [ -f coverage/report.txt ]; then
+            grep 'ℹ' coverage/report.txt | sed 's/^ℹ //' | sed 's/^/    /' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
+      - name: Publish coverage badges
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        permissions:
+          contents: write
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish="$(mktemp -d)"
+          git init -q "$publish"
+          cp coverage/badges/*.json coverage/badges/*.svg "$publish"/
+          git -C "$publish" add -A
+          git -C "$publish" \
+            -c user.name=github-actions[bot] \
+            -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit -qm "ci: coverage badges for ${GITHUB_SHA}"
+          git -C "$publish" push -f \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/badges"

@@ -25,7 +25,9 @@
     "extensions": ["./extensions/keep-head-compaction.ts"]
   },
   "scripts": {
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='scripts/**' --test-coverage-exclude='**/node_modules/**' test/*.test.ts",
+    "coverage": "node scripts/coverage-badges.mjs --out coverage/badges --coverage-dir coverage/report.txt"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

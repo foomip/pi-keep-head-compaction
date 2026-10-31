@@ -1,5 +1,9 @@
 # pi-keep-head-compaction
 
+[![CI](https://github.com/foomip/pi-keep-head-compaction/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/foomip/pi-keep-head-compaction/actions/workflows/ci.yml?branch=main)
+[![Branch coverage](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffoomip%2Fpi-keep-head-compaction%2Fbadges%2Fbranch-badge.json&query=%24.message&label=branch%20coverage)](https://github.com/foomip/pi-keep-head-compaction/tree/badges)
+[![Line coverage](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffoomip%2Fpi-keep-head-compaction%2Fbadges%2Flines-badge.json&query=%24.message&label=line%20coverage)](https://github.com/foomip/pi-keep-head-compaction/tree/badges)
+
 A [Pi coding agent](https://pi.dev) extension that changes how context
 compaction treats the two ends of your conversation.
 
@@ -228,3 +232,23 @@ window uses the configured values as-is.
   fires again and compresses the middle harder — the head is always retained.
 - Works with manual `/compact`, threshold-triggered auto-compaction, and
   overflow recovery.
+
+## Development
+
+```bash
+npm install
+npx tsc --noEmit    # types only: strict, no emit
+npm test            # node --test over test/*.test.ts
+npm run test:coverage
+npm run coverage    # writes coverage/report.txt + coverage/badges/*
+```
+
+CI (`.github/workflows/ci.yml`) runs the typecheck and the suite on every push
+and pull request, then measures coverage with the Node test runner. On `main`
+it also publishes `coverage/badges/*.json` to an orphan `badges` branch, which
+the shields.io dynamic badges at the top of this file read live — no
+third-party coverage service. Line coverage sits lower than branch coverage on
+purpose: the `session_before_compact` wiring needs a live Pi extension host to
+execute, so it is exercised by hand rather than by unit tests, while the
+splitting, budgeting, serialization and config logic that drives it is fully
+covered.
