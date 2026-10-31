@@ -66,6 +66,37 @@ previously kept messages get silently re-summarized.
 aborted, middle too small to be worth it), the extension stands down and Pi's
 default compaction runs instead.
 
+## Why: instruction drift on long-running tasks
+
+The beginning of a conversation is where the durable instructions live:
+
+- the **original task definition** — what was actually asked, in full, before
+  any summarization existed;
+- **early corrections and constraints** — "not X, do Y", "never touch this
+  file", "always run the tests first", stated once in the first exchanges and
+  never repeated;
+- **memory and injected context** — session-start memory injections,
+  AGENTS.md-derived guidance and prior-session handoffs that ride in the first
+  messages rather than in the (re-injected every turn) system prompt;
+- **the plan skeleton** — the numbered steps and architecture decisions the
+  agent is supposed to still be executing hours later.
+
+Compaction is the moment that head is put at risk. Everything before the kept
+tail is replaced by a summary, and a summary optimizes for *what happened* —
+not for *which rules must keep being obeyed*. Once the exact wording of an
+instruction is gone, the agent drifts on long tasks: it re-introduces patterns
+it was told to avoid, drops steps from the original spec, quietly relaxes
+constraints, or re-litigates decisions that were already settled. Each
+subsequent compaction compounds the loss, because summaries are themselves
+summarized.
+
+Keeping the head verbatim is cheap insurance against exactly this. The first
+~20k tokens are the region where instruction density is highest and narrative
+redundancy is lowest — re-including them word-for-word costs little context
+and guarantees the rules survive compaction unchanged. That is the entire job
+of this extension: make the beginning of the context a fixed point of
+compaction.
+
 ## Configuration
 
 Optional. Create a JSON config file — project overrides global:

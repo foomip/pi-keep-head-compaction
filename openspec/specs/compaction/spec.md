@@ -5,6 +5,14 @@
 Defines how `pi-keep-head-compaction` intercepts Pi's `session_before_compact`
 event and which guarantees a head-keeping compaction provides.
 
+Rationale: the beginning of the conversation carries the durable instructions
+(original task definition, early corrections and constraints, session-start
+memory injections, the plan skeleton). Default compaction replaces that head
+with a lossy summary optimized for what happened rather than which rules must
+keep being obeyed, and long-running agents then drift from those instructions.
+Preserving the head verbatim makes the start of the context a fixed point of
+compaction.
+
 ## Requirements
 
 ### Requirement: Head retention
