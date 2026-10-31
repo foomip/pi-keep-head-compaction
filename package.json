@@ -24,6 +24,9 @@
   "pi": {
     "extensions": ["./extensions/keep-head-compaction.ts"]
   },
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"

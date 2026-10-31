@@ -32,6 +32,11 @@
  *   - maxTokens:        output budget for the middle summary (default 8192)
  *   - minMiddleTokens:  stand down and let default compaction run when the middle
  *                       span is smaller than this (default 500)
+ *   - subagent:         optional object with any subset of the keys above;
+ *                       shallow-merged over the base config only in sessions
+ *                       hosted by a subagent runner (PI_SUBAGENT_CHILD=1)
+ *
+ * PI_KEEP_HEAD_TOKENS overrides the resolved head budget for both roles.
  *
  * When head + tail + reserveTokens exceed the model's context window, both
  * budgets are scaled down proportionally (same head:tail ratio) to fit; an
@@ -69,17 +74,97 @@ const DEFAULT_KEEP_HEAD_TOKENS = 20000;
 /** Below this much middle content, stand down and let default compaction run. */
 const MIN_MIDDLE_TOKENS = 500;
 
+interface RoleOverrides {
+	headTokens?: number;
+	tailTokens?: number;
+	model?: string;
+	maxTokens?: number;
+	minMiddleTokens?: number;
+}
+
 interface ExtensionConfig {
 	headTokens: number;
 	tailTokens: number;
 	model?: string;
 	maxTokens: number;
 	minMiddleTokens: number;
+	subagent?: RoleOverrides;
 }
+
+type SessionRole = "parent" | "subagent";
+type ConfigEnv = Record<string, string | undefined>;
 
 function parseNonNegativeInteger(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return undefined;
 	return value;
+}
+
+function parseModelOverride(value: unknown): string | undefined {
+	return typeof value === "string" && value.includes("/") ? value : undefined;
+}
+
+/** Parse the nested `subagent` block; invalid values degrade to absent. */
+function parseRoleOverrides(value: unknown): RoleOverrides | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const raw = value as Record<string, unknown>;
+	const overrides: RoleOverrides = {};
+	const headTokens = parseNonNegativeInteger(raw.headTokens);
+	if (headTokens !== undefined) overrides.headTokens = headTokens;
+	const tailTokens = parseNonNegativeInteger(raw.tailTokens);
+	if (tailTokens !== undefined) overrides.tailTokens = tailTokens;
+	const model = parseModelOverride(raw.model);
+	if (model !== undefined) overrides.model = model;
+	const maxTokens = parseNonNegativeInteger(raw.maxTokens);
+	if (maxTokens !== undefined) overrides.maxTokens = maxTokens;
+	const minMiddleTokens = parseNonNegativeInteger(raw.minMiddleTokens);
+	if (minMiddleTokens !== undefined) overrides.minMiddleTokens = minMiddleTokens;
+	return overrides;
+}
+
+/** Validate one raw config object (already merged across config layers). */
+export function parseConfigObject(raw: unknown): ExtensionConfig {
+	const merged =
+		typeof raw === "object" && raw !== null && !Array.isArray(raw)
+			? (raw as Record<string, unknown> & { keepHeadTokens?: unknown })
+			: {};
+	const subagent = parseRoleOverrides(merged.subagent);
+	return {
+		headTokens:
+			parseNonNegativeInteger(merged.headTokens) ??
+			parseNonNegativeInteger(merged.keepHeadTokens) ??
+			DEFAULT_KEEP_HEAD_TOKENS,
+		tailTokens: parseNonNegativeInteger(merged.tailTokens) ?? DEFAULT_KEEP_HEAD_TOKENS,
+		model: parseModelOverride(merged.model),
+		maxTokens: parseNonNegativeInteger(merged.maxTokens) ?? 8192,
+		minMiddleTokens: parseNonNegativeInteger(merged.minMiddleTokens) ?? MIN_MIDDLE_TOKENS,
+		...(subagent !== undefined ? { subagent } : {}),
+	};
+}
+
+/** The only role signal: a runner-hosted child process (never session lineage). */
+export function detectSessionRole(env: ConfigEnv = process.env): SessionRole {
+	return env.PI_SUBAGENT_CHILD === "1" ? "subagent" : "parent";
+}
+
+/** Shallow-merge the role block over the base config, then apply the env override. */
+export function resolveRoleConfig(
+	config: ExtensionConfig,
+	role: SessionRole,
+	env: ConfigEnv = process.env,
+): ExtensionConfig {
+	const overrides = role === "subagent" ? config.subagent : undefined;
+	const merged = {
+		headTokens: overrides?.headTokens ?? config.headTokens,
+		tailTokens: overrides?.tailTokens ?? config.tailTokens,
+		model: overrides?.model ?? config.model,
+		maxTokens: overrides?.maxTokens ?? config.maxTokens,
+		minMiddleTokens: overrides?.minMiddleTokens ?? config.minMiddleTokens,
+	};
+	const envRaw = env.PI_KEEP_HEAD_TOKENS;
+	const envValue = envRaw !== undefined ? Number.parseInt(envRaw, 10) : Number.NaN;
+	const headTokens =
+		Number.isSafeInteger(envValue) && envValue >= 0 ? envValue : merged.headTokens;
+	return { ...merged, headTokens };
 }
 
 interface MarkerDetails {
@@ -89,43 +174,42 @@ interface MarkerDetails {
 	priorMiddleSummary: string;
 }
 
-function readJsonConfig(configPath: string): Partial<ExtensionConfig> {
+function readJsonConfig(configPath: string): Record<string, unknown> {
 	try {
 		const raw = fs.readFileSync(configPath, "utf8");
-		const parsed = JSON.parse(raw) as Partial<ExtensionConfig>;
-		return typeof parsed === "object" && parsed !== null ? parsed : {};
+		const parsed: unknown = JSON.parse(raw);
+		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: {};
 	} catch {
 		return {};
 	}
 }
 
-/** Project config wins over global; PI_KEEP_HEAD_TOKENS wins over the head budget. */
-function loadConfig(cwd: string): ExtensionConfig {
+/** Project config wins over global, including nested `subagent` keys. */
+export function loadConfig(cwd: string, env: ConfigEnv = process.env): ExtensionConfig {
 	const project = readJsonConfig(path.join(cwd, ".pi", "keep-head-compaction.json"));
 	const home = readJsonConfig(
-		path.join(process.env.HOME ?? "", ".pi", "agent", "keep-head-compaction.json"),
+		path.join(env.HOME ?? "", ".pi", "agent", "keep-head-compaction.json"),
 	);
-	const merged = {
-		...home,
-		...project,
-	} as Partial<ExtensionConfig> & { keepHeadTokens?: unknown };
-	const envRaw = process.env.PI_KEEP_HEAD_TOKENS;
-	const envValue = envRaw !== undefined ? Number.parseInt(envRaw, 10) : Number.NaN;
-	const headTokens =
-		Number.isSafeInteger(envValue) && envValue >= 0
-			? envValue
-			: (parseNonNegativeInteger(merged.headTokens) ??
-				parseNonNegativeInteger(merged.keepHeadTokens) ??
-				DEFAULT_KEEP_HEAD_TOKENS);
-	const model =
-		typeof merged.model === "string" && merged.model.includes("/") ? merged.model : undefined;
-	return {
-		headTokens,
-		tailTokens: parseNonNegativeInteger(merged.tailTokens) ?? DEFAULT_KEEP_HEAD_TOKENS,
-		model,
-		maxTokens: parseNonNegativeInteger(merged.maxTokens) ?? 8192,
-		minMiddleTokens: parseNonNegativeInteger(merged.minMiddleTokens) ?? MIN_MIDDLE_TOKENS,
-	};
+	const merged: Record<string, unknown> = { ...home, ...project };
+	const homeSubagent = home.subagent;
+	const projectSubagent = project.subagent;
+	if (homeSubagent !== undefined || projectSubagent !== undefined) {
+		merged.subagent = {
+			...(typeof homeSubagent === "object" &&
+			homeSubagent !== null &&
+			!Array.isArray(homeSubagent)
+				? homeSubagent
+				: {}),
+			...(typeof projectSubagent === "object" &&
+			projectSubagent !== null &&
+			!Array.isArray(projectSubagent)
+				? projectSubagent
+				: {}),
+		};
+	}
+	return parseConfigObject(merged);
 }
 
 /**
@@ -254,7 +338,8 @@ ${middleText}
 export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
 		const { preparation, branchEntries, signal } = event;
-		const config = loadConfig(ctx.cwd);
+		const role = detectSessionRole();
+		const config = resolveRoleConfig(loadConfig(ctx.cwd), role);
 
 		// Window-aware head/tail budgets; scaled down proportionally when both
 		// cannot fit alongside the response reserve.
@@ -341,7 +426,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		ctx.ui.notify(
-			`keep-head-compaction: preserving ${head.length} head + tail=${tailTokens}t verbatim, summarizing ${middleAll.length} middle messages`,
+			`keep-head-compaction: ${role} profile: ${headTokens}h/${tailTokens}t — preserving ${head.length} head + tail=${tailTokens}t verbatim, summarizing ${middleAll.length} middle messages`,
 			"info",
 		);
 

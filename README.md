@@ -125,6 +125,35 @@ Optional. Create a JSON config file — project overrides global:
 | `model` | session model | Summarizer override as `provider/model-id` (e.g. a cheap fast model just for summaries). Falls back to the session model with a warning if not found. |
 | `maxTokens` | `8192` | Output budget for the middle summary. |
 | `minMiddleTokens` | `500` | Stand down (use default compaction) when the middle span is smaller than this — avoids a no-op compaction loop when head + tail ≈ the whole context. |
+| `subagent` | absent | Optional object holding any subset of the keys above, applied only in subagent sessions. See [Subagent sessions](#subagent-sessions). |
+
+### Subagent sessions
+
+A subagent session is a different context economy: its opening messages are the
+task brief, file boundaries and acceptance gates, while its recent tail is
+mostly regenerable tool output. Use `subagent` to give children different
+budgets without changing the parent running in the same working directory:
+
+```json
+{
+  "headTokens": 20000,
+  "tailTokens": 20000,
+  "subagent": { "headTokens": 12000, "tailTokens": 6000 }
+}
+```
+
+In that example a child keeps 12000 head / 6000 tail, while the interactive
+parent keeps 20000 / 20000. The block is a shallow merge: keys it omits
+(`model`, `maxTokens`, `minMiddleTokens`, and any budget not named) keep the
+base value, and an invalid value is ignored rather than treated as an error.
+The role is read from `PI_SUBAGENT_CHILD=1`, which only runner-hosted child
+processes set — forked or cloned interactive sessions stay `parent`.
+
+`PI_KEEP_HEAD_TOKENS` is applied last and overrides the resolved head budget
+for **both** roles. To stand the extension down for children entirely (they
+then get Pi's default compaction), set `"subagent": { "headTokens": 0 }`.
+The compaction notification names the resolved role and budgets, e.g.
+`keep-head-compaction: subagent profile: 12000h/6000t ...`.
 
 **Small context windows.** If `headTokens + tailTokens + reserveTokens`
 exceeds the model's context window, both budgets are scaled down
