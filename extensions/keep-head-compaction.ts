@@ -1,0 +1,409 @@
+/**
+ * pi-keep-head-compaction
+ *
+ * Custom compaction for the Pi coding agent that preserves BOTH ends of the
+ * conversation when compaction fires:
+ *
+ *   - the first `headTokens` tokens of the session, verbatim, and
+ *   - the last `tailTokens` tokens, verbatim (pi's kept tail, re-cut with
+ *     pi's own cut-point logic when it differs from the session setting).
+ *
+ * If the model's context window cannot fit head + tail + reserve, both
+ * budgets are scaled down proportionally while keeping their ratio.
+ *
+ * Only the middle span is summarized. The head is carried verbatim inside the
+ * compaction entry's summary text (pi's cut-point model has a single
+ * retention boundary, so this is the only way to retain both ends), and is
+ * re-emitted unchanged on every subsequent compaction via the entry's
+ * `details` field — repeated compactions never re-summarize or duplicate it.
+ *
+ * Configuration (optional), project overrides global, env overrides the head budget:
+ *   - project:  <project>/.pi/keep-head-compaction.json
+ *   - global:   ~/.pi/agent/keep-head-compaction.json
+ *   - env:      PI_KEEP_HEAD_TOKENS=20000
+ *
+ * Config keys:
+ *   - headTokens:       tokens of session start preserved verbatim (default 20000;
+ *                       legacy alias: keepHeadTokens)
+ *   - tailTokens:       tokens of session end preserved verbatim (default 20000;
+ *                       overrides compaction.keepRecentTokens when they differ)
+ *   - model:            summarizer override as "provider/model-id" (default: the
+ *                       model the session is currently using)
+ *   - maxTokens:        output budget for the middle summary (default 8192)
+ *   - minMiddleTokens:  stand down and let default compaction run when the middle
+ *                       span is smaller than this (default 500)
+ *
+ * When head + tail + reserveTokens exceed the model's context window, both
+ * budgets are scaled down proportionally (same head:tail ratio) to fit; an
+ * unknown context window uses the configured values as-is.
+ *
+ * If the span to summarize is too small to leave a meaningful middle (no
+ * compression would happen), the extension stands down and pi's default
+ * compaction runs instead.
+ */
+
+import { uuidv7 } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	convertToLlm,
+	estimateTokens,
+	findCutPoint,
+	serializeConversation,
+} from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+// Host types not re-exported from the package root; derive them from the API surface.
+type AgentMessage = Parameters<typeof convertToLlm>[0][number];
+type SessionEntry = Parameters<typeof findCutPoint>[0][number];
+
+interface FileOpsLike {
+	read?: Iterable<string>;
+	written?: Iterable<string>;
+	edited?: Iterable<string>;
+}
+
+const DETAILS_KIND = "pi-keep-head-compaction";
+const DETAILS_VERSION = 1;
+const DEFAULT_KEEP_HEAD_TOKENS = 20000;
+/** Below this much middle content, stand down and let default compaction run. */
+const MIN_MIDDLE_TOKENS = 500;
+
+interface ExtensionConfig {
+	headTokens: number;
+	tailTokens: number;
+	model?: string;
+	maxTokens: number;
+	minMiddleTokens: number;
+}
+
+function parseNonNegativeInteger(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return undefined;
+	return value;
+}
+
+interface MarkerDetails {
+	kind: string;
+	version: number;
+	headText: string;
+	priorMiddleSummary: string;
+}
+
+function readJsonConfig(configPath: string): Partial<ExtensionConfig> {
+	try {
+		const raw = fs.readFileSync(configPath, "utf8");
+		const parsed = JSON.parse(raw) as Partial<ExtensionConfig>;
+		return typeof parsed === "object" && parsed !== null ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+/** Project config wins over global; PI_KEEP_HEAD_TOKENS wins over the head budget. */
+function loadConfig(cwd: string): ExtensionConfig {
+	const project = readJsonConfig(path.join(cwd, ".pi", "keep-head-compaction.json"));
+	const home = readJsonConfig(
+		path.join(process.env.HOME ?? "", ".pi", "agent", "keep-head-compaction.json"),
+	);
+	const merged = {
+		...home,
+		...project,
+	} as Partial<ExtensionConfig> & { keepHeadTokens?: unknown };
+	const envRaw = process.env.PI_KEEP_HEAD_TOKENS;
+	const envValue = envRaw !== undefined ? Number.parseInt(envRaw, 10) : Number.NaN;
+	const headTokens =
+		Number.isSafeInteger(envValue) && envValue >= 0
+			? envValue
+			: (parseNonNegativeInteger(merged.headTokens) ??
+				parseNonNegativeInteger(merged.keepHeadTokens) ??
+				DEFAULT_KEEP_HEAD_TOKENS);
+	const model =
+		typeof merged.model === "string" && merged.model.includes("/") ? merged.model : undefined;
+	return {
+		headTokens,
+		tailTokens: parseNonNegativeInteger(merged.tailTokens) ?? DEFAULT_KEEP_HEAD_TOKENS,
+		model,
+		maxTokens: parseNonNegativeInteger(merged.maxTokens) ?? 8192,
+		minMiddleTokens: parseNonNegativeInteger(merged.minMiddleTokens) ?? MIN_MIDDLE_TOKENS,
+	};
+}
+
+/**
+ * Shrink head/tail proportionally when both cannot fit alongside the response
+ * reserve. Unknown or zero context window uses the requested values as-is.
+ */
+function scaleBudgets(
+	headTokens: number,
+	tailTokens: number,
+	contextWindow: number,
+	reserveTokens: number,
+): { headTokens: number; tailTokens: number } {
+	if (!contextWindow || contextWindow <= 0) return { headTokens, tailTokens };
+	const available = contextWindow - Math.max(0, reserveTokens);
+	if (headTokens + tailTokens <= available) return { headTokens, tailTokens };
+	if (available <= 0) return { headTokens: 0, tailTokens: 0 };
+	const ratio = headTokens / (headTokens + tailTokens);
+	const scaledHead = Math.floor(available * ratio);
+	return { headTokens: scaledHead, tailTokens: available - scaledHead };
+}
+
+/** Split leading messages into a verbatim head of ~keepHeadTokens tokens. */
+function splitHead(
+	messages: AgentMessage[],
+	keepHeadTokens: number,
+): { head: AgentMessage[]; middle: AgentMessage[] } {
+	const head: AgentMessage[] = [];
+	let headTokens = 0;
+	let cut = 0;
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i];
+		if (!message) break;
+		headTokens += estimateTokens(message);
+		if (headTokens >= keepHeadTokens) {
+			cut = i + 1;
+			break;
+		}
+	}
+	if (cut > 0) {
+		head.push(...messages.slice(0, cut));
+	}
+	return { head, middle: messages.slice(cut) };
+}
+
+/** Find the most recent compaction entry produced by this extension. */
+function findPriorMarker(branchEntries: SessionEntry[]): MarkerDetails | undefined {
+	for (let i = branchEntries.length - 1; i >= 0; i--) {
+		const entry = branchEntries[i] as { type?: string; details?: unknown };
+		if (entry.type !== "compaction" || entry.details === undefined) continue;
+		const details = entry.details as Partial<MarkerDetails>;
+		if (details.kind === DETAILS_KIND && typeof details.headText === "string") {
+			return {
+				kind: DETAILS_KIND,
+				version: DETAILS_VERSION,
+				headText: details.headText,
+				priorMiddleSummary:
+					typeof details.priorMiddleSummary === "string" ? details.priorMiddleSummary : "",
+			};
+		}
+	}
+	return undefined;
+}
+
+function entryId(entry: SessionEntry | undefined): string {
+	return (entry as { id?: string } | undefined)?.id ?? "";
+}
+
+function entryMessage(entry: SessionEntry): AgentMessage | undefined {
+	return entry.type === "message" ? entry.message : undefined;
+}
+
+function messagesBetween(entries: SessionEntry[], from: number, to: number): AgentMessage[] {
+	const out: AgentMessage[] = [];
+	for (let i = from; i < to && i < entries.length; i++) {
+		const entry = entries[i];
+		if (!entry) break;
+		const message = entryMessage(entry);
+		if (message) out.push(message);
+	}
+	return out;
+}
+
+function countMessageEntries(entries: SessionEntry[], from: number, to: number): number {
+	let count = 0;
+	for (let i = from; i < to && i < entries.length; i++) {
+		const entry = entries[i];
+		if (!entry) break;
+		if (entryMessage(entry)) count++;
+	}
+	return count;
+}
+
+function buildSummaryPrompt(
+	middleText: string,
+	priorMiddleSummary: string,
+	foreignPreviousSummary: string | undefined,
+	fileOps: FileOpsLike,
+): string {
+	const priorState = priorMiddleSummary
+		? `An earlier compaction already produced the summary below. Merge it with the new conversation span: keep everything still relevant from it, and update it with the new span.\n\n<earlier-summary>\n${priorMiddleSummary}\n</earlier-summary>\n\n`
+		: foreignPreviousSummary
+			? `A previous compaction summary of the session follows. Merge it with the new conversation span below.\n\n<previous-summary>\n${foreignPreviousSummary}\n</previous-summary>\n\n`
+			: "";
+	const modified = [...new Set([...(fileOps.edited ?? []), ...(fileOps.written ?? [])])].sort();
+	const readFiles = [...new Set(fileOps.read ?? [])].sort();
+	const files =
+		readFiles.length + modified.length > 0
+			? `\nFiles read during this span:\n${readFiles.join("\n")}\n\nFiles modified during this span:\n${modified.join("\n")}\n`
+			: "";
+	return `You are a conversation summarizer for a coding agent. Summarize the middle span of a long session. The beginning and end of the session are preserved verbatim elsewhere, so focus ONLY on the span below.
+
+Capture:
+1. The main goals and objectives discussed
+2. Key decisions made and their rationale
+3. Important code changes, file modifications, or technical details
+4. Current state of any ongoing work
+5. Any blockers, issues, or open questions
+6. Next steps that were planned or suggested
+
+Format the summary as structured markdown with sections: Goal, Constraints & Preferences, Progress (Done / In Progress / Blocked), Key Decisions, Next Steps, Critical Context.${files}
+${priorState}<conversation-span>
+${middleText}
+</conversation-span>`;
+}
+
+export default function (pi: ExtensionAPI) {
+	pi.on("session_before_compact", async (event, ctx) => {
+		const { preparation, branchEntries, signal } = event;
+		const config = loadConfig(ctx.cwd);
+
+		// Window-aware head/tail budgets; scaled down proportionally when both
+		// cannot fit alongside the response reserve.
+		const { headTokens, tailTokens } = scaleBudgets(
+			config.headTokens,
+			config.tailTokens,
+			ctx.model?.contextWindow ?? 0,
+			preparation.settings.reserveTokens,
+		);
+
+		// tailTokens overrides pi's compaction.keepRecentTokens: re-cut the tail
+		// with pi's own cut-point logic and adjust the summarized span accordingly.
+		let prep = preparation;
+		if (tailTokens !== preparation.settings.keepRecentTokens && !preparation.isSplitTurn) {
+			const piCutIndex = branchEntries.findIndex((e) => e.id === preparation.firstKeptEntryId);
+			if (piCutIndex >= 0) {
+				const cut = findCutPoint(branchEntries, 0, branchEntries.length, tailTokens);
+				if (cut.firstKeptEntryIndex > piCutIndex) {
+					// Smaller tail than pi's: extend the summarized span with the
+					// messages pi would have kept.
+					prep = {
+						...preparation,
+						messagesToSummarize: [
+							...preparation.messagesToSummarize,
+							...messagesBetween(branchEntries, piCutIndex, cut.firstKeptEntryIndex),
+						],
+						firstKeptEntryId: entryId(branchEntries[cut.firstKeptEntryIndex]),
+					};
+				} else if (cut.firstKeptEntryIndex < piCutIndex) {
+					// Bigger tail than pi's: keep more, drop the trailing span messages.
+					const drop = countMessageEntries(
+						branchEntries,
+						cut.firstKeptEntryIndex,
+						piCutIndex,
+					);
+					prep = {
+						...preparation,
+						messagesToSummarize: preparation.messagesToSummarize.slice(
+							0,
+							Math.max(0, preparation.messagesToSummarize.length - drop),
+						),
+						firstKeptEntryId: entryId(branchEntries[cut.firstKeptEntryIndex]),
+					};
+				}
+			}
+		}
+
+		const prior = findPriorMarker(branchEntries);
+		const { head, middle } = prior
+			? { head: [], middle: [...prep.messagesToSummarize] }
+			: splitHead(prep.messagesToSummarize, headTokens);
+
+		// Split-span prefix messages belong to the summarized middle.
+		const middleAll = [...middle, ...prep.turnPrefixMessages];
+		if (head.length === 0 && middleAll.length === 0) return undefined;
+		if (head.length === 0 && prior === undefined) return undefined; // nothing worth keeping verbatim
+		if (
+			prior === undefined &&
+			middleAll.reduce((sum, m) => sum + estimateTokens(m), 0) < config.minMiddleTokens
+		) {
+			return undefined; // too little middle to compress; default compaction is a better fit
+		}
+
+		const headText = prior ? prior.headText : serializeConversation(convertToLlm(head));
+		const middleText = serializeConversation(convertToLlm(middleAll));
+		if (!middleText.trim() && prior === undefined) return undefined;
+
+		// Summarizer: config.model override ("provider/model-id") or the session's current model.
+		let model = ctx.model;
+		if (config.model) {
+			const slash = config.model.indexOf("/");
+			model = ctx.modelRegistry.find(config.model.slice(0, slash), config.model.slice(slash + 1));
+			if (!model) {
+				ctx.ui.notify(
+					`keep-head-compaction: model "${config.model}" not found, using session model`,
+					"warning",
+				);
+				model = ctx.model;
+			}
+		}
+		if (!model) {
+			ctx.ui.notify("keep-head-compaction: no active model, using default compaction", "warning");
+			return undefined;
+		}
+
+		ctx.ui.notify(
+			`keep-head-compaction: preserving ${head.length} head + tail=${tailTokens}t verbatim, summarizing ${middleAll.length} middle messages`,
+			"info",
+		);
+
+		try {
+			const prompt = buildSummaryPrompt(
+				middleText || "(no new messages in this span)",
+				prior?.priorMiddleSummary ?? "",
+				prior === undefined ? prep.previousSummary : undefined,
+				prep.fileOps,
+			);
+			const response = await ctx.modelRegistry.complete(
+				model,
+				{
+					messages: [
+						{
+							role: "user" as const,
+							content: [{ type: "text" as const, text: prompt }],
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{ maxTokens: config.maxTokens, signal, cacheRetention: "none", sessionId: uuidv7() },
+			);
+			const middleSummary = response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n");
+			if (!middleSummary.trim()) {
+				if (!signal.aborted) {
+					ctx.ui.notify("keep-head-compaction: empty summary, using default compaction", "warning");
+				}
+				return undefined;
+			}
+
+			const summary = [
+				"<verbatim-conversation-start>",
+				"The following is the beginning of this session, preserved exactly as it happened:",
+				headText,
+				"</verbatim-conversation-start>",
+				"",
+				"## Compacted middle history",
+				middleSummary,
+			].join("\n");
+
+			return {
+				compaction: {
+					summary,
+					firstKeptEntryId: prep.firstKeptEntryId,
+					tokensBefore: prep.tokensBefore,
+					usage: response.usage,
+					details: {
+						kind: DETAILS_KIND,
+						version: DETAILS_VERSION,
+						headText,
+						priorMiddleSummary: middleSummary,
+					} satisfies MarkerDetails,
+				},
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`keep-head-compaction failed: ${message} — using default compaction`, "error");
+			return undefined;
+		}
+	});
+}
