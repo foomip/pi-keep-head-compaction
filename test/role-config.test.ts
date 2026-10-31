@@ -161,12 +161,12 @@ test("loadConfig merges project over global and keeps the nested block", () => {
 
 test("the README example resolves through the config loader", () => {
 	const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
-	const blocks = [...readme.matchAll(/```json\n([\s\S]*?)```/g)]
-		.map((match) => match[1])
-		.filter((text) => text.includes('"subagent"'));
-	assert.equal(blocks.length, 1, "README must contain exactly one subagent example block");
+	const match = readme.match(
+		/<!-- subagent-example:start -->\n```json\n([\s\S]*?)```\n<!-- subagent-example:end -->/,
+	);
+	assert.ok(match, "README must mark its canonical subagent example");
 
-	const project = withProjectConfig(JSON.parse(blocks[0]));
+	const project = withProjectConfig(JSON.parse(match[1]));
 	const config = loadConfig(project, { HOME: tempDir("keep-head-empty-home-") });
 
 	const child = resolveRoleConfig(config, "subagent", {});

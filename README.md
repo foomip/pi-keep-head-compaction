@@ -129,11 +129,19 @@ Optional. Create a JSON config file — project overrides global:
 
 ### Subagent sessions
 
-A subagent session is a different context economy: its opening messages are the
-task brief, file boundaries and acceptance gates, while its recent tail is
-mostly regenerable tool output. Use `subagent` to give children different
-budgets without changing the parent running in the same working directory:
+**Why children need different budgets.** A subagent is not a smaller copy of
+the parent session; it is a different context economy. Its opening messages
+are the *contract* — the task brief, file boundaries, acceptance gates, and
+"write your report before the clock dies" — and nothing later in the session
+restates them. Its recent tail is mostly regenerable working state: tool
+output, half-read files, retried commands. A child that loses its head has
+lost the task; a child that loses part of its tail usually re-runs one
+command. `subagent` expresses that asymmetry without a second config file,
+because parent and child share a working directory.
 
+**Example: protect the brief, shrink the tail.**
+
+<!-- subagent-example:start -->
 ```json
 {
   "headTokens": 20000,
@@ -141,19 +149,69 @@ budgets without changing the parent running in the same working directory:
   "subagent": { "headTokens": 12000, "tailTokens": 6000 }
 }
 ```
+<!-- subagent-example:end -->
 
-In that example a child keeps 12000 head / 6000 tail, while the interactive
-parent keeps 20000 / 20000. The block is a shallow merge: keys it omits
-(`model`, `maxTokens`, `minMiddleTokens`, and any budget not named) keep the
-base value, and an invalid value is ignored rather than treated as an error.
-The role is read from `PI_SUBAGENT_CHILD=1`, which only runner-hosted child
-processes set — forked or cloned interactive sessions stay `parent`.
+A child keeps 12000 head / 6000 tail while the interactive parent in the same
+cwd keeps 20000 / 20000.
 
+**Example: a cheap summarizer for workers.** Children often do routine work,
+so a fast small model is usually enough to summarize their middle span. Only
+child sessions change; the parent's own summaries stay on the base model:
+
+```json
+{
+  "model": "anthropic/claude-sonnet-4-5",
+  "subagent": { "model": "google/gemini-2.5-flash", "maxTokens": 4096 }
+}
+```
+
+**Example: a worker on a small-window model.** The configured budgets are
+scaled to the model that session is actually running, so a child on a smaller
+window keeps a proportional head instead of overflowing. Reserving some room
+up front is still cheaper than a forced re-compaction:
+
+```json
+{
+  "subagent": { "headTokens": 8000, "tailTokens": 4000, "minMiddleTokens": 250 }
+}
+```
+
+**Example: stand down for children entirely.** `headTokens: 0` makes the
+extension return `undefined`, so a child gets Pi's default compaction while
+parents keep head retention:
+
+```json
+{
+  "subagent": { "headTokens": 0 }
+}
+```
+
+**How the merge works.** `subagent` is a shallow merge over the base config:
+keys it omits (`model`, `maxTokens`, `minMiddleTokens`, and any budget not
+named) keep the base value. Values are validated exactly like the base keys,
+so a typo such as `"headTokens": "lots"` is treated as absent and falls back
+to the base value instead of breaking compaction. A `subagent` value that is
+not a JSON object is ignored.
+
+**How the role is detected.** The only signal is `PI_SUBAGENT_CHILD=1`, set
+by the runner process that hosts asynchronous child sessions — never session
+lineage. Sessions created with `/fork`, `/clone` or `newSession({ parentSession })`
+therefore stay `parent`. Foreground/sync children cannot load extensions at
+all, so they never see this feature. A nested `pi` launched from a child's
+shell tool inherits the variable and deliberately resolves as `subagent`.
+
+**Precedence.** `global → project → role merge → environment`, so
 `PI_KEEP_HEAD_TOKENS` is applied last and overrides the resolved head budget
-for **both** roles. To stand the extension down for children entirely (they
-then get Pi's default compaction), set `"subagent": { "headTokens": 0 }`.
-The compaction notification names the resolved role and budgets, e.g.
-`keep-head-compaction: subagent profile: 12000h/6000t ...`.
+for **both** parent and child. Window-aware scaling then applies to whichever
+budgets the role resolved to, using that session's model. The compaction
+notification names the resolved role and budgets, e.g.
+`keep-head-compaction: subagent profile: 12000h/6000t ...`, so you can confirm
+which profile a child actually used.
+
+**Not supported:** per-agent-name profiles (for example different budgets for
+`scout` versus a writer) and role-specific environment variables. The config
+shape leaves room for the former, but no name discovery or prompt-tag parsing
+is performed.
 
 **Small context windows.** If `headTokens + tailTokens + reserveTokens`
 exceeds the model's context window, both budgets are scaled down
