@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -36,17 +38,29 @@ jobs:
           name: coverage
           path: coverage/
           retention-days: 14
-      - name: Publish coverage badges
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        permissions:
-          contents: write
+
+  # Only the publisher may write, and only for pushes to main, so pull request
+  # jobs never hold a write token.
+  publish-badges:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage
+          path: coverage
+      - name: Publish coverage badges to the badges branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           publish="$(mktemp -d)"
           git init -q "$publish"
-          cp coverage/badges/*.json coverage/badges/*.svg "$publish"/
+          ls -1 coverage/badges
+          cp coverage/badges/* "$publish"/
           git -C "$publish" add -A
           git -C "$publish" \
             -c user.name=github-actions[bot] \
