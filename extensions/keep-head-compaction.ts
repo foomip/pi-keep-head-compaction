@@ -231,27 +231,48 @@ function scaleBudgets(
 	return { headTokens: scaledHead, tailTokens: available - scaledHead };
 }
 
-/** Split leading messages into a verbatim head of ~keepHeadTokens tokens. */
-function splitHead(
+/**
+ * Split leading messages into a verbatim head of ~keepHeadTokens tokens.
+ *
+ * The head ends at the message that crosses the budget. A span that never
+ * crosses the budget is the entire head (empty middle), and a zero budget
+ * preserves nothing — both are deliberate outcomes, never silent head loss.
+ */
+export function splitHead(
 	messages: AgentMessage[],
 	keepHeadTokens: number,
 ): { head: AgentMessage[]; middle: AgentMessage[] } {
-	const head: AgentMessage[] = [];
+	if (!Number.isFinite(keepHeadTokens) || keepHeadTokens <= 0) {
+		return { head: [], middle: [...messages] };
+	}
 	let headTokens = 0;
 	let cut = 0;
-	for (let i = 0; i < messages.length; i++) {
-		const message = messages[i];
-		if (!message) break;
+	for (const message of messages) {
 		headTokens += estimateTokens(message);
-		if (headTokens >= keepHeadTokens) {
-			cut = i + 1;
-			break;
-		}
+		cut += 1;
+		if (headTokens >= keepHeadTokens) break;
 	}
-	if (cut > 0) {
-		head.push(...messages.slice(0, cut));
-	}
-	return { head, middle: messages.slice(cut) };
+	return { head: messages.slice(0, cut), middle: messages.slice(cut) };
+}
+
+export interface CompactionNotice {
+	role: SessionRole;
+	headTokens: number;
+	tailTokens: number;
+	/** Messages newly carved as head in this run; 0 when the head is carried. */
+	headMessages: number;
+	/** Size of the head text re-emitted unchanged from an earlier compaction entry. */
+	retainedHeadChars?: number;
+	middleCount: number;
+}
+
+/** One line naming exactly what was kept verbatim and what was summarized. */
+export function formatCompactionNotice(notice: CompactionNotice): string {
+	const head =
+		notice.retainedHeadChars !== undefined
+			? `head=${notice.retainedHeadChars} chars carried from the earlier compaction`
+			: `head=${notice.headMessages} messages`;
+	return `keep-head-compaction: ${notice.role} profile: ${notice.headTokens}h/${notice.tailTokens}t — preserving ${head} + tail=${notice.tailTokens}t verbatim, summarizing ${notice.middleCount} middle messages`;
 }
 
 /** Find the most recent compaction entry produced by this extension. */
@@ -350,6 +371,10 @@ export default function (pi: ExtensionAPI) {
 			preparation.settings.reserveTokens,
 		);
 
+		// Documented opt-out: a zero head budget keeps no head, so hand back to
+		// pi's default compaction instead of summarizing a headless span.
+		if (headTokens <= 0) return undefined;
+
 		// tailTokens overrides pi's compaction.keepRecentTokens: re-cut the tail
 		// with pi's own cut-point logic and adjust the summarized span accordingly.
 		let prep = preparation;
@@ -426,7 +451,14 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		ctx.ui.notify(
-			`keep-head-compaction: ${role} profile: ${headTokens}h/${tailTokens}t — preserving ${head.length} head + tail=${tailTokens}t verbatim, summarizing ${middleAll.length} middle messages`,
+			formatCompactionNotice({
+				role,
+				headTokens,
+				tailTokens,
+				headMessages: head.length,
+				...(prior ? { retainedHeadChars: headText.length } : {}),
+				middleCount: middleAll.length,
+			}),
 			"info",
 		);
 

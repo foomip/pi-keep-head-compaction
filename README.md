@@ -210,7 +210,11 @@ for **both** parent and child. Window-aware scaling then applies to whichever
 budgets the role resolved to, using that session's model. The compaction
 notification names the resolved role and budgets, e.g.
 `keep-head-compaction: subagent profile: 12000h/6000t ...`, so you can confirm
-which profile a child actually used.
+which profile a child actually used. The same line reports the head as
+`head=N messages` when it is carved fresh and as
+`head=N chars carried from the earlier compaction` when it is re-emitted from a
+prior compaction entry — a carried head is preserved, so a later compaction
+never reports the head as `0`.
 
 **Not supported:** per-agent-name profiles (for example different budgets for
 `scout` versus a writer) and role-specific environment variables. The config
