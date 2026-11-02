@@ -1,0 +1,64 @@
+# Publishes the package to npm from a pushed vX.Y.Z tag using OIDC trusted
+# publishing — no npm token is stored anywhere; each publish exchanges a
+# short-lived GitHub OIDC token for a scoped registry credential, and npm
+# generates a provenance attestation automatically (public repo + public
+# package).
+#
+# Bootstrap order (one time, cannot be automated — trusted publishing cannot
+# create a brand-new package, only publish new versions of an existing one):
+#   1. Publish v0.1.0 manually from a local terminal (`npm publish`).
+#   2. On npmjs.com → package → Settings → Trusted publishing, add a GitHub
+#      Actions publisher with EXACTLY:
+#        organization/user: foomip
+#        repository:        pi-keep-head-compaction
+#        workflow filename: release.yml
+#      and under "Allowed actions" tick "Allow npm publish" (new configs are
+#      stage-only by default; a stage-only config will make this job fail).
+#      Complete the first trusted publish within 2 days or the config expires.
+#   3. Every release after that: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+#      Keep the tag and package.json version in lockstep — the guard below
+#      refuses to publish a mismatched pair.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node 26 ships npm ≥ 11.5.1, the minimum for trusted publishing.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - run: npx tsc --noEmit
+
+      - run: npm test
+
+      - name: Refuse a tag that disagrees with package.json
+        run: |
+          set -euo pipefail
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${expected}" >&2
+            exit 1
+          fi
+
+      # Provenance is generated automatically under trusted publishing; do not
+      # add --provenance (it would double-attest).
+      - run: npm publish
