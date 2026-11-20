@@ -8,7 +8,7 @@ A [Pi coding agent](https://pi.dev) extension that changes how context
 compaction treats the two ends of your conversation.
 
 Pi's built-in compaction summarizes everything except a recent tail
-(`keepRecentTokens`, default 20k tokens) — so the start of a long session
+(`keepRecentTokens`, default 20k tokens) - so the start of a long session
 (original instructions, the first plan, early decisions) survives only as
 summary prose. This package keeps the **first** N tokens of the session
 verbatim **and** the recent tail verbatim (both configurable), summarizing
@@ -65,7 +65,7 @@ windows. This extension hooks `session_before_compact` and:
    Pi would.
 
 **Repeats safely.** The verbatim head is stored in the compaction entry's
-`details` and re-emitted unchanged on every later compaction — it is never
+`details` and re-emitted unchanged on every later compaction - it is never
 re-summarized, never duplicated, and never lost to the
 [re-compaction quirk](https://github.com/earendil-works/pi/issues/2608) where
 previously kept messages get silently re-summarized.
@@ -78,19 +78,19 @@ default compaction runs instead.
 
 The beginning of a conversation is where the durable instructions live:
 
-- the **original task definition** — what was actually asked, in full, before
+- the **original task definition** - what was actually asked, in full, before
   any summarization existed;
-- **early corrections and constraints** — "not X, do Y", "never touch this
+- **early corrections and constraints** - "not X, do Y", "never touch this
   file", "always run the tests first", stated once in the first exchanges and
   never repeated;
-- **memory and injected context** — session-start memory injections,
+- **memory and injected context** - session-start memory injections,
   AGENTS.md-derived guidance and prior-session handoffs that ride in the first
   messages rather than in the (re-injected every turn) system prompt;
-- **the plan skeleton** — the numbered steps and architecture decisions the
+- **the plan skeleton** - the numbered steps and architecture decisions the
   agent is supposed to still be executing hours later.
 
 Compaction is the moment that head is put at risk. Everything before the kept
-tail is replaced by a summary, and a summary optimizes for *what happened* —
+tail is replaced by a summary, and a summary optimizes for *what happened*  - 
 not for *which rules must keep being obeyed*. Once the exact wording of an
 instruction is gone, the agent drifts on long tasks: it re-introduces patterns
 it was told to avoid, drops steps from the original spec, quietly relaxes
@@ -100,14 +100,14 @@ summarized.
 
 Keeping the head verbatim is cheap insurance against exactly this. The first
 ~20k tokens are the region where instruction density is highest and narrative
-redundancy is lowest — re-including them word-for-word costs little context
+redundancy is lowest - re-including them word-for-word costs little context
 and guarantees the rules survive compaction unchanged. That is the entire job
 of this extension: make the beginning of the context a fixed point of
 compaction.
 
 ## Configuration
 
-Optional. Create a JSON config file — project overrides global:
+Optional. Create a JSON config file - project overrides global:
 
 ```bash
 # project (wins)
@@ -129,10 +129,10 @@ Optional. Create a JSON config file — project overrides global:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `headTokens` | `20000` | Tokens of session start preserved verbatim. Also overridable via the `PI_KEEP_HEAD_TOKENS` env var. Legacy alias: `keepHeadTokens`. |
-| `tailTokens` | `20000` | Tokens of session end preserved verbatim. When it differs from pi's `compaction.keepRecentTokens`, it **overrides** the pi setting — the kept tail is re-cut with pi's own cut-point logic at this size. |
+| `tailTokens` | `20000` | Tokens of session end preserved verbatim. When it differs from pi's `compaction.keepRecentTokens`, it **overrides** the pi setting - the kept tail is re-cut with pi's own cut-point logic at this size. |
 | `model` | session model | Summarizer override as `provider/model-id` (e.g. a cheap fast model just for summaries). Falls back to the session model with a warning if not found. |
-| `maxTokens` | unset | **Optional** output budget for the middle summary. Unset (recommended) applies no cap: the summary uses the model's own output limit, exactly like pi's built-in compaction. Set it only to force a smaller cap — a cap that is too low truncates the summary, which is the failure pi removed in 1.4.0. |
-| `minMiddleTokens` | `500` | Stand down (use default compaction) when the middle span is smaller than this — avoids a no-op compaction loop when head + tail ≈ the whole context. |
+| `maxTokens` | unset | **Optional** output budget for the middle summary. Unset (recommended) applies no cap: the summary uses the model's own output limit, exactly like pi's built-in compaction. Set it only to force a smaller cap - a cap that is too low truncates the summary, which is the failure pi removed in 1.4.0. |
+| `minMiddleTokens` | `500` | Stand down (use default compaction) when the middle span is smaller than this - avoids a no-op compaction loop when head + tail ≈ the whole context. |
 | `subagent` | absent | Optional object holding any subset of the keys above, applied only in subagent sessions. See [Subagent sessions](#subagent-sessions). |
 
 ### Commands
@@ -149,8 +149,8 @@ summarization). It changes nothing.
 
 **Why children need different budgets.** A subagent is not a smaller copy of
 the parent session; it is a different context economy. Its opening messages
-are the *contract* — the task brief, file boundaries, acceptance gates, and
-"write your report before the clock dies" — and nothing later in the session
+are the *contract* - the task brief, file boundaries, acceptance gates, and
+"write your report before the clock dies" - and nothing later in the session
 restates them. Its recent tail is mostly regenerable working state: tool
 output, half-read files, retried commands. A child that loses its head has
 lost the task; a child that loses part of its tail usually re-runs one
@@ -212,7 +212,7 @@ to the base value instead of breaking compaction. A `subagent` value that is
 not a JSON object is ignored.
 
 **How the role is detected.** The only signal is `PI_SUBAGENT_CHILD=1`, set
-by the runner process that hosts asynchronous child sessions — never session
+by the runner process that hosts asynchronous child sessions - never session
 lineage. Sessions created with `/fork`, `/clone` or `newSession({ parentSession })`
 therefore stay `parent`. Foreground/sync children cannot load extensions at
 all, so they never see this feature. A nested `pi` launched from a child's
@@ -227,7 +227,7 @@ notification names the resolved role and budgets, e.g.
 which profile a child actually used. The same line reports the head as
 `head=N messages` when it is carved fresh and as
 `head=N chars carried from the earlier compaction` when it is re-emitted from a
-prior compaction entry — a carried head is preserved, so a later compaction
+prior compaction entry - a carried head is preserved, so a later compaction
 never reports the head as `0`.
 
 **Not supported:** per-agent-name profiles (for example different budgets for
@@ -260,7 +260,7 @@ from the current span.
   exactly like conversation history; only token accounting differs slightly.
 - Keeping the head means compaction frees less context than default. If
   head + tail + summary still exceed your context window, compaction simply
-  fires again and compresses the middle harder — the head is always retained.
+  fires again and compresses the middle harder - the head is always retained.
 - Works with manual `/compact`, threshold-triggered auto-compaction, and
   overflow recovery.
 
@@ -277,7 +277,7 @@ npm run coverage    # writes coverage/report.txt + coverage/badges/*
 CI (`.github/workflows/ci.yml`) runs the typecheck and the suite on every push
 and pull request, then measures coverage with the Node test runner. On `main`
 it also publishes `coverage/badges/*.json` to an orphan `badges` branch, which
-the shields.io dynamic badges at the top of this file read live — no
+the shields.io dynamic badges at the top of this file read live - no
 third-party coverage service. Line coverage sits lower than branch coverage on
 purpose: the `session_before_compact` wiring needs a live Pi extension host to
 execute, so it is exercised by hand rather than by unit tests, while the

@@ -15,7 +15,7 @@
  * compaction entry's summary text (pi's cut-point model has a single
  * retention boundary, so this is the only way to retain both ends), and is
  * re-emitted unchanged on every subsequent compaction via the entry's
- * `details` field — repeated compactions never re-summarize or duplicate it.
+ * `details` field - repeated compactions never re-summarize or duplicate it.
  *
  * Configuration (optional), project overrides global, env overrides the head budget:
  *   - project:  <project>/.pi/keep-head-compaction.json
@@ -268,7 +268,7 @@ function scaleBudgets(
  *
  * The head ends at the message that crosses the budget. A span that never
  * crosses the budget is the entire head (empty middle), and a zero budget
- * preserves nothing — both are deliberate outcomes, never silent head loss.
+ * preserves nothing - both are deliberate outcomes, never silent head loss.
  */
 export function splitHead(
 	messages: AgentMessage[],
@@ -304,7 +304,7 @@ export function formatCompactionNotice(notice: CompactionNotice): string {
 		notice.retainedHeadChars !== undefined
 			? `head=${notice.retainedHeadChars} chars carried from the earlier compaction`
 			: `head=${notice.headMessages} messages`;
-	return `keep-head-compaction: ${notice.role} profile: ${notice.headTokens}h/${notice.tailTokens}t — preserving ${head} + tail=${notice.tailTokens}t verbatim, summarizing ${notice.middleCount} middle messages`;
+	return `keep-head-compaction: ${notice.role} profile: ${notice.headTokens}h/${notice.tailTokens}t - preserving ${head} + tail=${notice.tailTokens}t verbatim, summarizing ${notice.middleCount} middle messages`;
 }
 
 /** Find the most recent compaction entry produced by this extension. */

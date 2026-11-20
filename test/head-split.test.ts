@@ -59,7 +59,7 @@ test("a freshly carved head notice names the message count", () => {
 			headMessages: 28,
 			middleCount: 63,
 		}),
-		"keep-head-compaction: parent profile: 22000h/18000t — preserving head=28 messages + tail=18000t verbatim, summarizing 63 middle messages",
+		"keep-head-compaction: parent profile: 22000h/18000t - preserving head=28 messages + tail=18000t verbatim, summarizing 63 middle messages",
 	);
 });
 
@@ -74,7 +74,7 @@ test("a carried head notice names the retained size, not zero messages", () => {
 	});
 	assert.equal(
 		notice,
-		"keep-head-compaction: parent profile: 22000h/18000t — preserving head=58053 chars carried from the earlier compaction + tail=18000t verbatim, summarizing 130 middle messages",
+		"keep-head-compaction: parent profile: 22000h/18000t - preserving head=58053 chars carried from the earlier compaction + tail=18000t verbatim, summarizing 130 middle messages",
 	);
 	assert.doesNotMatch(notice, /preserving 0 head/);
 });
@@ -87,5 +87,5 @@ test("the notice names the resolved role and budgets", () => {
 		headMessages: 6,
 		middleCount: 12,
 	});
-	assert.match(notice, /^keep-head-compaction: subagent profile: 12000h\/2000t — /);
+	assert.match(notice, /^keep-head-compaction: subagent profile: 12000h\/2000t - /);
 });
