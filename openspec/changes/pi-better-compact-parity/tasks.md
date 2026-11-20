@@ -125,9 +125,22 @@
 
 ## 7. Live observation and release (release is Nelson's action)
 
-- [ ] 7.1 Live RPC-host observation of the delegation on pi 1.5.2: the middle
-      summary is produced by the host's own summarizer, the head is carried
-      verbatim, and no output cap is applied when `maxTokens` is unset
+- [x] 7.1 Live RPC-host observation on pi 1.5.2 (driver
+      `/tmp/khc-live/run.mjs`, isolated `HOME` so the installed 0.1.0 copy cannot
+      hook, project `.pi/keep-head-compaction.json` with tiny budgets, model
+      `anthropic/claude-haiku-5-5`): the shipped extension loads in a real host,
+      the hook fires with the real preparation, and the stand-down path runs
+      end-to-end (`nothing to preserve and nothing to summarize`, then pi's own
+      compaction lands normally with its split-turn merge). **What it did NOT
+      reach:** a run where the middle span is non-empty, so the delegated
+      summarization never fired live. Cause, measured from the host: with
+      `keepRecentTokens` tiny (200-300) and short turns, the preparation arrives
+      with `messagesToSummarize: 0`, `turnPrefixMessages: 10`,
+      `isSplitTurn: true`, `tokensBefore: 3514` - pi put the whole conversation in
+      the current turn span, leaving no middle for us, and standing down is the
+      specified behavior. A live check of the delegation itself needs a session
+      whose spans are large relative to the budgets (few long turns, normal
+      `keepRecentTokens`), which is the remaining owed observation.
 - [ ] 7.2 Live observation of the owed item from thread 22: a real subagent
       child's compaction shows the pinned head rather than a re-narration of it
 - [ ] 7.3 Create the npm trusted-publishing config for package

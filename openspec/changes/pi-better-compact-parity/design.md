@@ -95,6 +95,22 @@ Probes were run in `/tmp/khp-probe` with a throwaway extension driven over RPC
   compaction reaches the RPC `compact` response without `usage`/`details`, which
   matches the host docs ("may be omitted by custom compaction handlers").
 
+### Live host observation (task 7.1, 2026-11-20, pi 1.5.2 host)
+
+Driven over RPC with an isolated `HOME` (so an installed 0.1.0 copy could not also
+hook) and a project config of tiny budgets. Two facts only a live run gives:
+
+- pi 1.5.2 writes its own compaction entries with
+  `details: { readFiles, modifiedFiles }` and **no** `kind`. Our marker is keyed on
+  `kind`, so `findPriorMarker` ignores pi's entries and a session holding both kinds
+  keeps exactly one head.
+- With a tiny `keepRecentTokens` and short turns the preparation arrives as
+  `messagesToSummarize: 0`, `turnPrefixMessages: 10`, `isSplitTurn: true`,
+  `tokensBefore: 3514`: pi put the whole conversation in the current turn span, so no
+  middle is left for us, and standing down is the specified outcome. The delegated
+  summarization still owes a live observation on a session whose spans are larger
+  than the budgets; the unit suite is what pins that path today.
+
 ## Goals / Non-Goals
 
 **Goals:**

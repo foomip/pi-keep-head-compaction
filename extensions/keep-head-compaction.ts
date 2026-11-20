@@ -570,7 +570,11 @@ function createHostDeps(pi: ExtensionAPI, ctx: { modelRegistry: unknown }, model
 			}
 			return await registry.getApiKeyAndHeaders(model);
 		},
-		getRetrySettings: () => pi.getSettings()?.retry,
+		// pi.getSettings() is an ExtensionAPI method on 1.5.x hosts; older hosts
+		// (and the 1.4 type surface) may not expose it, and the compaction must
+		// survive that: absent settings fall back to pi's own literals (D7).
+		getRetrySettings: () =>
+			typeof pi.getSettings === "function" ? pi.getSettings()?.retry : undefined,
 	};
 }
 
@@ -714,6 +718,7 @@ export default function (pi: ExtensionAPI) {
 		// A split turn's prefix stays with the host, which summarizes it with its own
 		// prompt and merges it under "Turn Context (split turn)". Folding it into the
 		// middle span here used to produce a summary shaped differently from pi's.
+
 		if (head.length === 0 && middleSpan.length === 0) return standDown("nothing to preserve and nothing to summarize");
 		if (head.length === 0 && prior === undefined) return standDown("no head found within the budget");
 
@@ -722,7 +727,6 @@ export default function (pi: ExtensionAPI) {
 			middleSpan.reduce((sum, m) => sum + estimateTokens(m), 0) < config.minMiddleTokens
 		) {
 			return standDown("middle smaller than minMiddleTokens");
-
 		}
 
 		const headText = prior ? prior.headText : serializeConversation(convertToLlm(head));
@@ -829,7 +833,7 @@ export default function (pi: ExtensionAPI) {
 			const role = detectSessionRole(env);
 			const layers = readConfigLayers(ctx.cwd, env);
 			const config = resolveRoleConfig(parseConfigObject(mergedLayers(layers)), role);
-			const settings = pi.getSettings();
+			const settings = typeof pi.getSettings === "function" ? pi.getSettings() : undefined;
 			const scaled = scaleBudgets(
 				config.headTokens,
 				config.tailTokens,
