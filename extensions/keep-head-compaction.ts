@@ -70,7 +70,7 @@ interface FileOpsLike {
 }
 
 const DETAILS_KIND = "pi-keep-head-compaction";
-const DETAILS_VERSION = 1;
+const DETAILS_VERSION = 2;
 const DEFAULT_KEEP_HEAD_TOKENS = 20000;
 /** Below this much middle content, stand down and let default compaction run. */
 const MIN_MIDDLE_TOKENS = 500;
@@ -174,6 +174,9 @@ interface MarkerDetails {
 	version: number;
 	headText: string;
 	priorMiddleSummary: string;
+	/** Cumulative across compactions: pi skips hook-produced entries, so these are ours. */
+	readFiles: string[];
+	modifiedFiles: string[];
 }
 
 function readJsonConfig(configPath: string): Record<string, unknown> {
@@ -286,10 +289,17 @@ function findPriorMarker(branchEntries: SessionEntry[]): MarkerDetails | undefin
 		if (details.kind === DETAILS_KIND && typeof details.headText === "string") {
 			return {
 				kind: DETAILS_KIND,
+				// Version 1 markers carry no file lists; they still carry the head.
 				version: DETAILS_VERSION,
 				headText: details.headText,
 				priorMiddleSummary:
 					typeof details.priorMiddleSummary === "string" ? details.priorMiddleSummary : "",
+				readFiles: Array.isArray(details.readFiles)
+					? details.readFiles.filter((f): f is string => typeof f === "string")
+					: [],
+				modifiedFiles: Array.isArray(details.modifiedFiles)
+					? details.modifiedFiles.filter((f): f is string => typeof f === "string")
+					: [],
 			};
 		}
 	}
@@ -601,24 +611,23 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const prior = findPriorMarker(branchEntries);
-		const { head, middle } = prior
+		const { head, middle: middleSpan } = prior
 			? { head: [], middle: [...prep.messagesToSummarize] }
 			: splitHead(prep.messagesToSummarize, headTokens);
 
-		// Split-span prefix messages belong to the summarized middle.
-		const middleAll = [...middle, ...prep.turnPrefixMessages];
-		if (head.length === 0 && middleAll.length === 0) return undefined;
+		// A split turn's prefix stays with the host, which summarizes it with its own
+		// prompt and merges it under "Turn Context (split turn)". Folding it into the
+		// middle span here used to produce a summary shaped differently from pi's.
+		if (head.length === 0 && middleSpan.length === 0) return undefined;
 		if (head.length === 0 && prior === undefined) return undefined; // nothing worth keeping verbatim
 		if (
 			prior === undefined &&
-			middleAll.reduce((sum, m) => sum + estimateTokens(m), 0) < config.minMiddleTokens
+			middleSpan.reduce((sum, m) => sum + estimateTokens(m), 0) < config.minMiddleTokens
 		) {
 			return undefined; // too little middle to compress; default compaction is a better fit
 		}
 
 		const headText = prior ? prior.headText : serializeConversation(convertToLlm(head));
-		const middleText = serializeConversation(convertToLlm(middleAll));
-		if (!middleText.trim() && prior === undefined) return undefined;
 
 		// Summarizer: config.model override ("provider/model-id") or the session's current model.
 		let model = ctx.model;
@@ -645,20 +654,31 @@ export default function (pi: ExtensionAPI) {
 				tailTokens,
 				headMessages: head.length,
 				...(prior ? { retainedHeadChars: headText.length } : {}),
-				middleCount: middleAll.length,
+				middleCount: middleSpan.length,
 			}),
 			"info",
 		);
 
 		try {
+			// The verbatim head is ours, never the host's input: the span handed to the
+			// summarizer is the middle only. A split turn's prefix is left exactly as
+			// the host produced it, so it summarizes that part with its own prompt.
 			const delegated = await summarizeMiddleSpan({
-				preparation: prep,
+				preparation: { ...prep, messagesToSummarize: middleSpan },
 				model,
 				...(event.customInstructions !== undefined ? { customInstructions: event.customInstructions } : {}),
 				signal,
 				...(ctx.thinkingLevel !== undefined ? { thinkingLevel: ctx.thinkingLevel } : {}),
 				env: process.env,
 				...(prior ? { prior: { priorMiddleSummary: prior.priorMiddleSummary } } : {}),
+				...(prior
+					? {
+							priorFileLists: {
+								readFiles: prior.readFiles,
+								modifiedFiles: prior.modifiedFiles,
+							},
+						}
+					: {}),
 				...(config.maxTokens !== undefined ? { maxTokensCap: config.maxTokens } : {}),
 				deps: depsFactory(pi, ctx, model),
 			});
@@ -690,6 +710,8 @@ export default function (pi: ExtensionAPI) {
 						version: DETAILS_VERSION,
 						headText,
 						priorMiddleSummary: delegated.summary,
+						readFiles: delegated.readFiles,
+						modifiedFiles: delegated.modifiedFiles,
 					} satisfies MarkerDetails,
 				},
 			};

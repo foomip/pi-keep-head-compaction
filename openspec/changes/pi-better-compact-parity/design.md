@@ -262,6 +262,20 @@ summarizeMiddleSpan({
   handed to it, because the host retries inside `compact()` already; a second
   retry loop on top would multiply provider calls for no benefit. Pinned by test.
 
+### D12 - The verbatim head is excluded from the span handed to the summarizer
+
+Discovered while wiring the delegation, and the most important correctness detail
+in the change: `compact()` summarizes whatever `messagesToSummarize` contains.
+Handing it the untouched preparation therefore summarizes the head too, so the
+head would be carried verbatim **and** re-narrated in the middle summary - the
+exact "pinned head, not a re-narration" failure this package exists to prevent.
+
+So the handler hands the delegate
+`{ ...prep, messagesToSummarize: middleSpan }`, where `middleSpan` is what
+`splitHead` left after the head, and `turnPrefixMessages` stays untouched for the
+host's own split-turn path. Pinned by a test asserting the delegated span excludes
+the head and keeps the prefix.
+
 ### D8 - `reason` and `willRetry` are observability, not policy
 
 Both go into the compaction notice and the status line. Deliberately no policy

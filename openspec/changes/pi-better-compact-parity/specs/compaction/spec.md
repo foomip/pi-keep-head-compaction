@@ -46,7 +46,8 @@ The extension SHALL re-emit the previously preserved head unchanged on every
 subsequent compaction, reading it from the prior compaction entry's `details`
 (the first marker found scanning `branchEntries` backwards). It SHALL pass the
 stored prior **middle** summary, never the wrapped head text, to the delegated
-summarizer as its previous-summary input.
+summarizer as its previous-summary input, and SHALL exclude the head's own
+messages from the span handed to the summarizer.
 
 #### Scenario: Second compaction after a head-keeping compaction
 
@@ -55,7 +56,14 @@ summarizer as its previous-summary input.
 - **THEN** the new summary contains the same verbatim head plus a fresh middle
   summary merged over the stored prior middle summary
 
-#### Scenario: The head is never a summarizer input
+#### Scenario: The head is never handed over to be summarized
+
+- **WHEN** the extension delegates summarization of a span it also preserved a head
+  for
+- **THEN** the span handed to the host summarizer excludes every message carried in
+  the verbatim head
+
+#### Scenario: The wrapped head is not the previous-summary input
 
 - **WHEN** the delegated summarizer is invoked on a session with a carried head
 - **THEN** its previous-summary input contains no `<verbatim-conversation-start>`

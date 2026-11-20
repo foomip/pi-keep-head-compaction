@@ -73,17 +73,22 @@
 
 ## 4. Green: split turns and cumulative file lists
 
-- [ ] 4.1 Drop the `turnPrefixMessages` fold and let the preparation reach
-      `compact()` untouched under `isSplitTurn`, leaving the tail re-cut still
-      skipped for split turns; verify 2.4 passes and the split-turn output
-      contains Pi's `**Turn Context (split turn):**` separator verbatim
-- [ ] 4.2 Extend `MarkerDetails` with `readFiles` / `modifiedFiles`, bump
-      `DETAILS_VERSION` to 2, read v1 markers as empty lists, and pass the union
-      into `compact()` as the preparation's `fileOps`; verify 2.5 passes and
-      `npm test` reports the whole suite green
-- [ ] 4.3 Add a test that a session compacted twice by this extension keeps the
-      head byte-identical across both entries and grows the file lists
-      monotonically
+- [x] 4.1 The turn-prefix fold is gone: the handler hands the delegate
+      `{ ...prep, messagesToSummarize: middleSpan }` with `turnPrefixMessages`
+      intact, so the host does its own two-call merge (D12 records why the head is
+      also excluded - otherwise the head is summarized and re-narrated). Tests
+      assert the delegated span excludes the head, keeps the prefix, and that the
+      host's `**Turn Context (split turn):**` separator survives into the emitted
+      summary
+- [x] 4.2 `MarkerDetails` carries `readFiles`/`modifiedFiles`,
+      `DETAILS_VERSION` is 2, a v1 marker reads as "head only, no lists", and the
+      union is passed into the delegate as `priorFileLists` so the host's file
+      blocks carry the whole history
+- [x] 4.3 Two-compaction coverage at the handler level: the head is re-emitted
+      byte-identically, the marker is rewritten at version 2, and the file lists
+      grow monotonically (`earlier.ts` + `later.ts`, `old-change.ts` +
+      `new-change.ts`); the v1-marker case is covered too. `npm test` 49/0,
+      `npx tsc --noEmit` clean
 
 ## 5. Status command
 
