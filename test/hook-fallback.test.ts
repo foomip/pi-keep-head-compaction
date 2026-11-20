@@ -15,19 +15,48 @@ type CompactHandler = (
 	>;
 
 /** Capture the registered handler from a stubbed extension host. */
-function captureHandler(): CompactHandler {
+interface RegisteredCommand {
+	description?: string;
+	handler: (args: string, ctx: unknown) => Promise<void>;
+}
+
+function captureExtension(): { handler: CompactHandler; commands: Record<string, RegisteredCommand> } {
 	let handler: CompactHandler | undefined;
+	const commands: Record<string, RegisteredCommand> = {};
 	extension({
 		on: (name: string, fn: CompactHandler) => {
 			if (name === "session_before_compact") handler = fn;
 		},
+		registerCommand: (name: string, options: RegisteredCommand) => {
+			commands[name] = options;
+		},
+		getSettings: () => ({ compaction: { keepRecentTokens: 20000, reserveTokens: 2048 } }),
 	} as never);
 	assert.ok(handler, "session_before_compact handler is registered");
-	return handler;
+	return { handler, commands };
+}
+
+function captureHandler(): CompactHandler {
+	return captureExtension().handler;
 }
 
 /** Project config wins over the global one, so the host's real config cannot leak in. */
+const realHome = process.env.HOME;
+let emptyHome = "";
+
+/**
+ * Isolate config loading: without this the tests would read the operator's own
+ * ~/.pi/agent/keep-head-compaction.json, whose values would leak into the
+ * budgets the assertions below pin.
+ */
+function isolateHome(): string {
+	if (!emptyHome) emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), "khc-home-"));
+	process.env.HOME = emptyHome;
+	return emptyHome;
+}
+
 function projectWith(config: Record<string, unknown>): string {
+	isolateHome();
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "keep-head-hook-"));
 	fs.mkdirSync(path.join(dir, ".pi"), { recursive: true });
 	fs.writeFileSync(path.join(dir, ".pi", "keep-head-compaction.json"), JSON.stringify(config));
@@ -59,7 +88,13 @@ function event(messages: unknown[] = [textMessage("x".repeat(400))]) {
  * so the stub lives in the delegation deps: passing a summary text stands in for
  * the host summarizer, and passing none means the summarizer must never be called.
  */
-function context(cwd: string, summary?: string) {
+function context(
+	cwd: string,
+	summary?: string,
+	status: { branchEntries?: unknown[]; entryCount?: number } = {},
+) {
+	const branchEntriesForStatus = status.branchEntries ?? [];
+	const entryCount = status.entryCount ?? 0;
 	const notified: string[] = [];
 	const calls: any[] = [];
 	setDelegationDepsFactoryForTests(() => ({
@@ -84,6 +119,10 @@ function context(cwd: string, summary?: string) {
 			model: { provider: "test", id: "test-model", contextWindow: 200000 },
 			modelRegistry: { find: () => undefined },
 			ui: { notify: (message: string) => notified.push(message) },
+			sessionManager: {
+				getBranch: () => branchEntriesForStatus,
+				getEntries: () => new Array(entryCount).fill({ type: "message" }),
+			},
 		},
 	};
 }
@@ -275,4 +314,62 @@ test("the host's split-turn separator survives into the emitted summary", async 
 	assert.match(result!.compaction!.summary, /<verbatim-conversation-start>/);
 });
 
-afterEach(() => setDelegationDepsFactoryForTests());
+
+test("the status command reports budgets, head state and the last outcome", async () => {
+	const marker = {
+		type: "compaction",
+		id: "prior",
+		details: {
+			kind: "pi-keep-head-compaction",
+			version: 2,
+			headText: "x".repeat(1234),
+			priorMiddleSummary: "old middle",
+			readFiles: ["a.ts", "b.ts"],
+			modifiedFiles: ["c.ts"],
+		},
+	};
+	const cwd = projectWith({ headTokens: 20000, tailTokens: 5000, maxTokens: 4096 });
+	const { commands } = captureExtension();
+	const { ctx, notified } = context(cwd, undefined, { branchEntries: [marker], entryCount: 7 });
+	const command = commands["keep-head-status"];
+	assert.ok(command, "the status command is registered");
+	await command.handler("", ctx);
+	const report = notified.join("\n");
+	assert.match(report, /role: parent \(PI_SUBAGENT_CHILD unset\)/);
+	assert.match(report, /config: .*\.pi\/keep-head-compaction\.json/);
+	assert.match(report, /head budget: 20000 tokens/);
+	assert.match(report, /tail budget: 5000 tokens .*pi keepRecentTokens 20000/);
+	assert.match(report, /head: carried verbatim across compactions \(1234 chars/);
+	assert.match(report, /session: 7 entries/);
+	assert.match(report, /files: 2 read, 1 modified/);
+	assert.match(report, /summary output budget: 4096 tokens \(cap\)/);
+	assert.match(report, /last outcome: no compaction decision taken yet/);
+});
+
+test("the status command reports an uncapped output budget", async () => {
+	const cwd = projectWith({ headTokens: 1000 });
+	const { commands } = captureExtension();
+	const { ctx, notified } = context(cwd);
+	await commands["keep-head-status"]!.handler("", ctx);
+	assert.match(notified.join("\n"), /summary output budget: model default \(no cap\)/);
+	assert.match(notified.join("\n"), /head: 0 messages still verbatim|head: not active/);
+});
+
+
+test("the status command names the most recent stand-down reason", async () => {
+	const cwd = projectWith({ headTokens: 2000, minMiddleTokens: 100000 });
+	const { handler, commands } = captureExtension();
+	const { ctx, notified } = context(cwd, "MIDDLE");
+	const base = event([textMessage("h".repeat(400)), textMessage("m".repeat(400))]);
+	assert.equal(await handler({ ...base, branchEntries: [] }, ctx), undefined, "the extension stands down");
+	await commands["keep-head-status"]!.handler("", ctx);
+	const report = notified.join("\n");
+	assert.match(report, /last outcome: stood down: middle smaller than minMiddleTokens/);
+	assert.match(report, /head budget: 2000 tokens/);
+});
+
+afterEach(() => {
+	setDelegationDepsFactoryForTests();
+	if (realHome === undefined) delete process.env.HOME;
+	else process.env.HOME = realHome;
+});

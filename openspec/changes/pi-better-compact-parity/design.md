@@ -303,6 +303,19 @@ publish" ticked, and the first trusted publish completed within 2 days of
 creating the config). `0.1.0` was published manually with no provenance; that is
 the reason to move now rather than at some later release.
 
+### D9 addendum (implementation, 2026-11-20)
+
+The status command reuses the hook's layering: `readConfigLayers` and
+`mergedLayers` were extracted from `loadConfig` so the report can name the files
+that actually contributed values instead of re-deriving them, and
+`buildStatusReport` is a pure helper over an `ExtensionStatus` snapshot so it is
+unit-testable without the extension host. The role line names the signal
+(`PI_SUBAGENT_CHILD=1` or unset) because that is the only role input that exists.
+Session entries are read through `ctx.sessionManager.getBranch()/getEntries()`:
+the 1.4.x `ExtensionCommandContext` exposes neither `getBranchEntries` nor
+`getAgentMessages`, and `pi.getSettings()` is an `ExtensionAPI` method, not a
+context method.
+
 ## Risks / Trade-offs
 
 - **Host coupling.** The extension now depends on `compact()` staying exported

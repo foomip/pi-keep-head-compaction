@@ -192,14 +192,37 @@ function readJsonConfig(configPath: string): Record<string, unknown> {
 }
 
 /** Project config wins over global, including nested `subagent` keys. */
-export function loadConfig(cwd: string, env: ConfigEnv = process.env): ExtensionConfig {
-	const project = readJsonConfig(path.join(cwd, ".pi", "keep-head-compaction.json"));
-	const home = readJsonConfig(
-		path.join(env.HOME ?? "", ".pi", "agent", "keep-head-compaction.json"),
-	);
-	const merged: Record<string, unknown> = { ...home, ...project };
-	const homeSubagent = home.subagent;
-	const projectSubagent = project.subagent;
+export interface ConfigLayers {
+	projectPath: string;
+	globalPath: string;
+	/** Files that actually contributed values, most specific first. */
+	sources: string[];
+	project: Record<string, unknown>;
+	global: Record<string, unknown>;
+}
+
+/** Read the config layers once, keeping track of which files contributed. */
+export function readConfigLayers(cwd: string, env: ConfigEnv = process.env): ConfigLayers {
+	const projectPath = path.join(cwd, ".pi", "keep-head-compaction.json");
+	const globalPath = path.join(env.HOME ?? "", ".pi", "agent", "keep-head-compaction.json");
+	const project = readJsonConfig(projectPath);
+	const global = readJsonConfig(globalPath);
+	return {
+		projectPath,
+		globalPath,
+		sources: [projectPath, globalPath].filter((_, i) =>
+			i === 0 ? Object.keys(project).length > 0 : Object.keys(global).length > 0,
+		),
+		project,
+		global,
+	};
+}
+
+/** Shallow-merge the layers, deep-merging only the `subagent` block. */
+export function mergedLayers(layers: ConfigLayers): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...layers.global, ...layers.project };
+	const homeSubagent = layers.global.subagent;
+	const projectSubagent = layers.project.subagent;
 	if (homeSubagent !== undefined || projectSubagent !== undefined) {
 		merged.subagent = {
 			...(typeof homeSubagent === "object" &&
@@ -214,7 +237,11 @@ export function loadConfig(cwd: string, env: ConfigEnv = process.env): Extension
 				: {}),
 		};
 	}
-	return parseConfigObject(merged);
+	return merged;
+}
+
+export function loadConfig(cwd: string, env: ConfigEnv = process.env): ExtensionConfig {
+	return parseConfigObject(mergedLayers(readConfigLayers(cwd, env)));
 }
 
 /**
@@ -554,7 +581,75 @@ export function setDelegationDepsFactoryForTests(factory?: DepsFactory): void {
 	depsFactory = factory ?? createHostDeps;
 }
 
+/**
+ * Last outcome of this extension in the session, for `/keep-head-status`.
+ * Observability only: it never feeds back into the compaction decision.
+ */
+export interface ExtensionStatus {
+	role: SessionRole;
+	roleSignal: string;
+	configSources: string[];
+	headTokens: number;
+	tailTokens: number;
+	keepRecentTokens: number;
+	configuredHeadTokens: number;
+	configuredTailTokens: number;
+	messagesInSession: number;
+	headCarriedChars?: number;
+	headMessages?: number;
+	filesRead: number;
+	filesModified: number;
+	maxTokens?: number;
+	lastOutcome: string;
+}
+
+/** Mutable, per-extension-instance state for the status command. */
+interface StatusTracker {
+	lastOutcome: string;
+}
+
+export function buildStatusReport(
+	status: ExtensionStatus,
+	noticeSink = { lines: [] as string[] },
+): string[] {
+	const lines: string[] = [];
+	lines.push(`keep-head-compaction: role: ${status.role} (${status.roleSignal})`);
+	lines.push(`  config: ${status.configSources.length ? status.configSources.join(", ") : "defaults only"}`);
+	lines.push(
+		`  head budget: ${status.headTokens} tokens (configured ${status.configuredHeadTokens})`,
+	);
+	lines.push(
+		`  tail budget: ${status.tailTokens} tokens (configured ${status.configuredTailTokens}, pi keepRecentTokens ${status.keepRecentTokens})`,
+	);
+	if (status.headCarriedChars !== undefined) {
+		lines.push(
+			`  head: carried verbatim across compactions (${status.headCarriedChars} chars, re-emitted unchanged)`,
+		);
+	} else if (status.headMessages) {
+		lines.push(`  head: ${status.headMessages} messages still verbatim (no compaction yet)`);
+	} else {
+		lines.push("  head: not active");
+	}
+	lines.push(`  session: ${status.messagesInSession} entries`);
+	lines.push(`  files: ${status.filesRead} read, ${status.filesModified} modified (cumulative)`);
+	lines.push(
+		status.maxTokens === undefined
+			? "  summary output budget: model default (no cap)"
+			: `  summary output budget: ${status.maxTokens} tokens (cap)`,
+	);
+	lines.push(`  last outcome: ${status.lastOutcome}`);
+	noticeSink.lines.push(...lines);
+	return lines;
+}
+
 export default function (pi: ExtensionAPI) {
+	const statusTracker: StatusTracker = { lastOutcome: "no compaction decision taken yet" };
+	/** Record why the extension stood down, then return the stand-down value. */
+	function standDown(reason: string): undefined {
+		statusTracker.lastOutcome = `stood down: ${reason}`;
+		return undefined;
+	}
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		const { preparation, branchEntries, signal } = event;
 		const role = detectSessionRole();
@@ -571,7 +666,8 @@ export default function (pi: ExtensionAPI) {
 
 		// Documented opt-out: a zero head budget keeps no head, so hand back to
 		// pi's default compaction instead of summarizing a headless span.
-		if (headTokens <= 0) return undefined;
+		if (headTokens <= 0) return standDown("head budget is 0")
+
 
 		// tailTokens overrides pi's compaction.keepRecentTokens: re-cut the tail
 		// with pi's own cut-point logic and adjust the summarized span accordingly.
@@ -618,13 +714,15 @@ export default function (pi: ExtensionAPI) {
 		// A split turn's prefix stays with the host, which summarizes it with its own
 		// prompt and merges it under "Turn Context (split turn)". Folding it into the
 		// middle span here used to produce a summary shaped differently from pi's.
-		if (head.length === 0 && middleSpan.length === 0) return undefined;
-		if (head.length === 0 && prior === undefined) return undefined; // nothing worth keeping verbatim
+		if (head.length === 0 && middleSpan.length === 0) return standDown("nothing to preserve and nothing to summarize");
+		if (head.length === 0 && prior === undefined) return standDown("no head found within the budget");
+
 		if (
 			prior === undefined &&
 			middleSpan.reduce((sum, m) => sum + estimateTokens(m), 0) < config.minMiddleTokens
 		) {
-			return undefined; // too little middle to compress; default compaction is a better fit
+			return standDown("middle smaller than minMiddleTokens");
+
 		}
 
 		const headText = prior ? prior.headText : serializeConversation(convertToLlm(head));
@@ -644,7 +742,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!model) {
 			ctx.ui.notify("keep-head-compaction: no active model, using default compaction", "warning");
-			return undefined;
+			return standDown("no active model");
 		}
 
 		ctx.ui.notify(
@@ -686,7 +784,7 @@ export default function (pi: ExtensionAPI) {
 				if (!signal.aborted) {
 					ctx.ui.notify("keep-head-compaction: summarizer gave no usable summary, using default compaction", "warning");
 				}
-				return undefined;
+				return standDown(signal.aborted ? "aborted during summarization" : "summarizer returned nothing usable");
 			}
 
 			const summary = [
@@ -698,6 +796,8 @@ export default function (pi: ExtensionAPI) {
 				"## Compacted middle history",
 				delegated.summary,
 			].join("\n");
+
+			statusTracker.lastOutcome = `compacted: ${head.length ? `${head.length} head messages, ` : "head carried, "}${middleSpan.length} middle messages summarized`;
 
 			return {
 				compaction: {
@@ -717,8 +817,47 @@ export default function (pi: ExtensionAPI) {
 			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`keep-head-compaction failed: ${message} — using default compaction`, "error");
-			return undefined;
+			ctx.ui.notify(`keep-head-compaction failed: ${message} - using default compaction`, "error");
+			return standDown(`delegation threw: ${message}`);
 		}
+	});
+
+	pi.registerCommand("keep-head-status", {
+		description: "Report this extension's budgets, head status, file history and last outcome",
+		handler: async (_args, ctx) => {
+			const env = process.env;
+			const role = detectSessionRole(env);
+			const layers = readConfigLayers(ctx.cwd, env);
+			const config = resolveRoleConfig(parseConfigObject(mergedLayers(layers)), role);
+			const settings = pi.getSettings();
+			const scaled = scaleBudgets(
+				config.headTokens,
+				config.tailTokens,
+				ctx.model?.contextWindow ?? 0,
+				settings?.compaction?.reserveTokens ?? 0,
+			);
+			const branch = ctx.sessionManager.getBranch();
+			const marker = findPriorMarker(branch);
+			const report = buildStatusReport({
+				role,
+				roleSignal:
+					role === "subagent" ? "PI_SUBAGENT_CHILD=1" : "PI_SUBAGENT_CHILD unset",
+				configSources: layers.sources.length
+					? layers.sources.map((f) => f.replace(env.HOME ?? "", "~"))
+					: ["defaults"],
+				headTokens: scaled.headTokens,
+				tailTokens: scaled.tailTokens,
+				configuredHeadTokens: config.headTokens,
+				configuredTailTokens: config.tailTokens,
+				keepRecentTokens: settings?.compaction?.keepRecentTokens ?? 0,
+				messagesInSession: ctx.sessionManager.getEntries().length,
+				...(marker ? { headCarriedChars: marker.headText.length } : {}),
+				filesRead: marker?.readFiles.length ?? 0,
+				filesModified: marker?.modifiedFiles.length ?? 0,
+				...(config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens }),
+				lastOutcome: statusTracker.lastOutcome,
+			});
+			ctx.ui.notify(report.join("\n"), "info");
+		},
 	});
 }

@@ -131,7 +131,17 @@ Optional. Create a JSON config file — project overrides global:
 | `minMiddleTokens` | `500` | Stand down (use default compaction) when the middle span is smaller than this — avoids a no-op compaction loop when head + tail ≈ the whole context. |
 | `subagent` | absent | Optional object holding any subset of the keys above, applied only in subagent sessions. See [Subagent sessions](#subagent-sessions). |
 
-### Subagent sessions
+### Commands
+
+`/keep-head-status` prints what the extension would do right now: the role it
+detected, the head and tail budgets (both the configured numbers and the
+window-scaled ones, alongside pi's own `keepRecentTokens`), whether a verbatim
+head is active or carried from an earlier compaction, how many files the summary
+history knows about, the summary output budget, and why the extension last stood
+down (a zero head budget, a middle too small to compress, no model, a failed
+summarization). It changes nothing.
+
+## Subagent sessions
 
 **Why children need different budgets.** A subagent is not a smaller copy of
 the parent session; it is a different context economy. Its opening messages

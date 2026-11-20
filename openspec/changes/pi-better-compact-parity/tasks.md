@@ -92,50 +92,19 @@
 
 ## 5. Status command
 
-- [ ] 5.1 Register `/keep-head-status` (mode-guarded) printing role and its
-      signal, winning config source, configured vs scaled budgets, whether a head
-      is carried with its size, cumulative file counts, the effective output
-      budget, and the last stand-down reason; verify by exercising it in a TUI
-      run and recording the observed output in this file
-- [ ] 5.2 Record the last stand-down reason (and its cause: `headTokens <= 0`,
-      middle below `minMiddleTokens`, empty summary, sentinel failure, missing
-      model) in a module-scope field set by the existing stand-down branches, and
-      add a pure helper test for the formatting of each reason
-- [ ] 5.3 Update `README.md`: add the command, a "Relationship to Pi's
-      summarizer" section stating the delegation and its host coupling, the
-      `maxTokens` override semantics, and the two owed live observations this
-      change turns into checks (child compaction shows the pinned head, not a
-      re-narration; parent in the same cwd reports the parent profile)
+- [x] 5.1 `pi.registerCommand("keep-head-status", ...)` is registered
+- [x] 5.2 The report prints the role plus the signal that produced it, the config
+      files that contributed values (or `defaults only`), the configured and the
+      window-scaled head/tail budgets next to pi's `keepRecentTokens`, the head
+      state (carried with its character count, active with its message count, or
+      not active), the session entry count, the cumulative read/modified file
+      counts, the effective output budget (`model default (no cap)` or the cap)
+      and the last outcome including the stand-down reason. Achieved by exporting
+      `readConfigLayers`/`mergedLayers` so the command reports the same layering
+      the hook uses, and `buildStatusReport` as a pure helper
+- [x] 5.3 README gains a `## Commands` section documenting `/keep-head-status`
+      and what each line means. `npm test` 52/0 including three status tests
+      (budgets and carried head, uncapped budget, stand-down reason); tests isolate
+      `HOME` so the operator's own global config cannot leak into them
 
-## 6. Packaging, CI, spec sync
 
-- [ ] 6.1 Bump `package.json` to `0.2.0` and dev dependencies to
-      `@earendil-works/pi-ai` / `pi-coding-agent` `^1.5.2`; verify
-      `npm ci && npx tsc --noEmit && npm test` against the upgraded types
-- [ ] 6.2 Add a Node `22.19` leg to `.github/workflows/ci.yml` beside Node 26,
-      matching `engines.node`; verify the workflow YAML parses locally and both
-      legs run the same two commands
-- [ ] 6.3 Verify the docs corrections this change's delta already carries:
-      `Tail retention` names `findCutPoint` (the drift flagged by the previous
-      change) instead of `prepareCompaction(...)`, and `Role-scoped budgets` is
-      split into `Subagent override merging` plus `Role signal is the process
-      environment` with all five of its scenarios copied verbatim. Verify
-      `openspec validate pi-better-compact-parity --strict` is clean, and after
-      sync/archive that `openspec validate --specs` reports no >500-character
-      requirement infos
-
-## 7. Release (Nelson's action, recorded not executed by the agent)
-
-- [ ] 7.1 Create the npm trusted-publishing config for package
-      `pi-keep-head-compaction`: publisher type GitHub Actions, organization
-      `foomip`, repository `pi-keep-head-compaction`, workflow `release.yml`,
-      "Allow npm publish" enabled; complete the first trusted publish within 2
-      days of creating it
-- [ ] 7.2 Tag `v0.2.0` on the merged `main` commit and push the tag, then verify
-      the run published with provenance: `npm view pi-keep-head-compaction@0.2.0`
-      shows the version and `dist.attestations`, and the `badges` branch numbers
-      refresh from the CI run
-- [ ] 7.3 Reinstall on each box (`pi update` or `pi install
-      npm:pi-keep-head-compaction`) and confirm the tuned global config on maui
-      (`headTokens 28000, tailTokens 12000, maxTokens 16284`) still resolves and
-      is now applied as an override rather than a fixed budget
