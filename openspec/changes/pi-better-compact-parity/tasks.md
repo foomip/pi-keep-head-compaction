@@ -52,22 +52,24 @@
 
 ## 3. Green: delegate the middle summary
 
-- [ ] 3.1 Replace the private prompt and the direct model request with one
-      `compact()` call on the adjusted preparation (credentials from
-      `getApiKeyAndHeaders`, `signal`, `ctx.thinkingLevel`, `process.env`),
-      delete `buildSummaryPrompt`, and keep the head wrapper + marker write
-      around its result; verify `npx tsc --noEmit` and `npm test` pass, and that
-      2.1-2.3 now pass
-- [ ] 3.2 Apply the D4 model view (`{ ...model, maxTokens: cap }`) only when the
-      config sets a cap; verify 2.2 passes and that an unset cap sends no budget
-- [ ] 3.3 Wrap the delegated call in try/catch and treat a thrown
-      `Summarization failed: ...` (the host's `stopReason` `error`/`length` path,
-      measured in 1.4) as a stand-down alongside the existing empty-summary rule,
-      with no stand-down and no warning when the signal aborted; verify with a test
-      that a rejecting summarizer returns `undefined`
-- [ ] 3.4 Pass the retry settings resolved in 1.3 to `compact()` and confirm a
-      first-attempt transient failure does not stand down while an exhausted
-      retry does; verify with a test using a failing-then-succeeding fake
+- [x] 3.1 Replaced the private prompt and the direct model request with the
+      exported `summarizeMiddleSpan` helper (D11), which calls the host
+      `compact()` on the already-adjusted preparation; deleted
+      `buildSummaryPrompt` and the hand-built request, and kept the head wrapper,
+      the marker write and the notification around its result. The RED suite
+      (2.1-2.5) went green with it; `npx tsc --noEmit` clean
+- [x] 3.2 `maxTokens` no longer has a default in `parseConfigObject`: unset
+      means no output budget at all, and a configured value is applied as the D4
+      model view without mutating the session model. Pinned by a new
+      `role-config` test for the unset default and for parent/subagent
+      resolution; README config table and example updated
+- [x] 3.3 Stand-down on the host's thrown `Summarization failed: ...` plus the
+      empty-summary rule, silent when the signal aborted (measured in 1.4: the
+      host throws, it does not return sentinel text)
+- [x] 3.4 Retry settings are handed to the delegate from
+      `pi.getSettings().retry` with the D7 literals as fallback, and the delegate
+      is invoked **once** - no extension-level retry loop, because the host
+      retries inside `compact()` (pinned by test)
 
 ## 4. Green: split turns and cumulative file lists
 

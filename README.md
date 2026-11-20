@@ -117,7 +117,7 @@ Optional. Create a JSON config file — project overrides global:
   "headTokens": 20000,
   "tailTokens": 20000,
   "model": "google/gemini-2.5-flash",
-  "maxTokens": 8192,
+  "maxTokens": 4096,
   "minMiddleTokens": 500
 }
 ```
@@ -127,7 +127,7 @@ Optional. Create a JSON config file — project overrides global:
 | `headTokens` | `20000` | Tokens of session start preserved verbatim. Also overridable via the `PI_KEEP_HEAD_TOKENS` env var. Legacy alias: `keepHeadTokens`. |
 | `tailTokens` | `20000` | Tokens of session end preserved verbatim. When it differs from pi's `compaction.keepRecentTokens`, it **overrides** the pi setting — the kept tail is re-cut with pi's own cut-point logic at this size. |
 | `model` | session model | Summarizer override as `provider/model-id` (e.g. a cheap fast model just for summaries). Falls back to the session model with a warning if not found. |
-| `maxTokens` | `8192` | Output budget for the middle summary. |
+| `maxTokens` | unset | **Optional** output budget for the middle summary. Unset (recommended) applies no cap: the summary uses the model's own output limit, exactly like pi's built-in compaction. Set it only to force a smaller cap — a cap that is too low truncates the summary, which is the failure pi removed in 1.4.0. |
 | `minMiddleTokens` | `500` | Stand down (use default compaction) when the middle span is smaller than this — avoids a no-op compaction loop when head + tail ≈ the whole context. |
 | `subagent` | absent | Optional object holding any subset of the keys above, applied only in subagent sessions. See [Subagent sessions](#subagent-sessions). |
 

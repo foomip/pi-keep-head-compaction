@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
-import extension from "../extensions/keep-head-compaction.ts";
+import extension, { setDelegationDepsFactoryForTests } from "../extensions/keep-head-compaction.ts";
 
 type CompactHandler = (
 	event: unknown,
@@ -51,21 +51,32 @@ function event(messages: unknown[] = [textMessage("x".repeat(400))]) {
 	};
 }
 
-function context(cwd: string, complete?: () => unknown) {
+/**
+ * The extension now delegates middle summarization to the host's own compact(),
+ * so the stub lives in the delegation deps: passing a summary text stands in for
+ * the host summarizer, and passing none means the summarizer must never be called.
+ */
+function context(cwd: string, summary?: string) {
 	const notified: string[] = [];
+	setDelegationDepsFactoryForTests(() => ({
+		compact: async (preparation: { firstKeptEntryId: string; tokensBefore: number }) => {
+			if (summary === undefined) throw new Error("summarizer must not be called");
+			return {
+				summary,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				usage: { input: 1, output: 1 },
+			};
+		},
+		resolveAuth: async () => ({ apiKey: "test-key", headers: {} }),
+		getRetrySettings: () => undefined,
+	}));
 	return {
 		notified,
 		ctx: {
 			cwd,
 			model: { provider: "test", id: "test-model", contextWindow: 200000 },
-			modelRegistry: {
-				find: () => undefined,
-				complete:
-					complete ??
-					(async () => {
-						throw new Error("summarizer must not be called");
-					}),
-			},
+			modelRegistry: { find: () => undefined },
 			ui: { notify: (message: string) => notified.push(message) },
 		},
 	};
@@ -89,10 +100,7 @@ test("a subagent with headTokens 0 stands down while the parent keeps its head",
 		if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
 		else process.env.PI_SUBAGENT_CHILD = previous;
 	}
-	const { ctx } = context(cwd, () => ({
-		content: [{ type: "text", text: "MIDDLE SUMMARY" }],
-		usage: {},
-	}));
+	const { ctx } = context(cwd, "MIDDLE SUMMARY");
 	const result = await captureHandler()(
 		event([textMessage("h".repeat(400)), textMessage("m".repeat(200))]),
 		ctx,
@@ -126,10 +134,7 @@ test("a zero head budget stands down even after an earlier head-keeping compacti
 	assert.deepEqual(notified, [], "a stand-down never reaches the summarizer");
 
 	const keptCwd = projectWith({ headTokens: 100, minMiddleTokens: 10 });
-	const kept = context(keptCwd, () => ({
-		content: [{ type: "text", text: "MIDDLE SUMMARY" }],
-		usage: {},
-	}));
+	const kept = context(keptCwd, "MIDDLE SUMMARY");
 	const result = await captureHandler()(
 		{ ...event([textMessage("m".repeat(200))]), branchEntries: [priorEntry] },
 		kept.ctx,
@@ -137,3 +142,5 @@ test("a zero head budget stands down even after an earlier head-keeping compacti
 	assert.ok(result?.compaction);
 	assert.match(result.compaction.summary, /OLD VERBATIM HEAD/);
 });
+
+afterEach(() => setDelegationDepsFactoryForTests());

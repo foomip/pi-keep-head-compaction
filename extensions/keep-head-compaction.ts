@@ -47,9 +47,10 @@
  * compaction runs instead.
  */
 
-import { uuidv7 } from "@earendil-works/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+	compact,
 	convertToLlm,
 	estimateTokens,
 	findCutPoint,
@@ -86,7 +87,8 @@ interface ExtensionConfig {
 	headTokens: number;
 	tailTokens: number;
 	model?: string;
-	maxTokens: number;
+	/** Opt-in override of the summary output budget; unset means the model's own limit. */
+	maxTokens?: number;
 	minMiddleTokens: number;
 	subagent?: RoleOverrides;
 }
@@ -135,7 +137,7 @@ export function parseConfigObject(raw: unknown): ExtensionConfig {
 			DEFAULT_KEEP_HEAD_TOKENS,
 		tailTokens: parseNonNegativeInteger(merged.tailTokens) ?? DEFAULT_KEEP_HEAD_TOKENS,
 		model: parseModelOverride(merged.model),
-		maxTokens: parseNonNegativeInteger(merged.maxTokens) ?? 8192,
+		maxTokens: parseNonNegativeInteger(merged.maxTokens),
 		minMiddleTokens: parseNonNegativeInteger(merged.minMiddleTokens) ?? MIN_MIDDLE_TOKENS,
 		...(subagent !== undefined ? { subagent } : {}),
 	};
@@ -323,37 +325,223 @@ function countMessageEntries(entries: SessionEntry[], from: number, to: number):
 	return count;
 }
 
-function buildSummaryPrompt(
-	middleText: string,
-	priorMiddleSummary: string,
-	foreignPreviousSummary: string | undefined,
-	fileOps: FileOpsLike,
-): string {
-	const priorState = priorMiddleSummary
-		? `An earlier compaction already produced the summary below. Merge it with the new conversation span: keep everything still relevant from it, and update it with the new span.\n\n<earlier-summary>\n${priorMiddleSummary}\n</earlier-summary>\n\n`
-		: foreignPreviousSummary
-			? `A previous compaction summary of the session follows. Merge it with the new conversation span below.\n\n<previous-summary>\n${foreignPreviousSummary}\n</previous-summary>\n\n`
-			: "";
-	const modified = [...new Set([...(fileOps.edited ?? []), ...(fileOps.written ?? [])])].sort();
-	const readFiles = [...new Set(fileOps.read ?? [])].sort();
-	const files =
-		readFiles.length + modified.length > 0
-			? `\nFiles read during this span:\n${readFiles.join("\n")}\n\nFiles modified during this span:\n${modified.join("\n")}\n`
-			: "";
-	return `You are a conversation summarizer for a coding agent. Summarize the middle span of a long session. The beginning and end of the session are preserved verbatim elsewhere, so focus ONLY on the span below.
+// ---------------------------------------------------------------------------
+// Middle summary: delegate to the host's own summarization pipeline.
+//
+// The extension decides WHAT survives compaction; Pi decides HOW the summarized
+// span is turned into prose. Calling the host function keeps the summary format,
+// the update path, the split-turn merge, the file blocks, the output-limit
+// behaviour and the retry policy from drifting away from the host again.
+// ---------------------------------------------------------------------------
 
-Capture:
-1. The main goals and objectives discussed
-2. Key decisions made and their rationale
-3. Important code changes, file modifications, or technical details
-4. Current state of any ongoing work
-5. Any blockers, issues, or open questions
-6. Next steps that were planned or suggested
+export interface RetrySettingsLike {
+	enabled: boolean;
+	maxRetries: number;
+	baseDelayMs: number;
+	maxAgentDelayMs: number;
+}
 
-Format the summary as structured markdown with sections: Goal, Constraints & Preferences, Progress (Done / In Progress / Blocked), Key Decisions, Next Steps, Critical Context.${files}
-${priorState}<conversation-span>
-${middleText}
-</conversation-span>`;
+/**
+ * Pi's own retry defaults (`settings-defaults.js`), which the package does not
+ * re-export at its root. `pi.getSettings().retry` reports what the user configured
+ * and nothing otherwise, so these literals are the fallback the host would apply.
+ */
+export const DEFAULT_RETRY_SETTINGS: RetrySettingsLike = {
+	enabled: true,
+	maxRetries: 3,
+	baseDelayMs: 2000,
+	maxAgentDelayMs: 60000,
+};
+
+export interface DelegatedCompaction {
+	summary: string;
+	firstKeptEntryId: string;
+	tokensBefore: number;
+	usage?: Usage;
+	details?: unknown;
+}
+
+export interface DelegationDeps {
+	compact: (
+		preparation: unknown,
+		model: unknown,
+		apiKey: unknown,
+		headers: Record<string, string> | undefined,
+		customInstructions: string | undefined,
+		signal: AbortSignal,
+		thinkingLevel: string | undefined,
+		streamFn: undefined,
+		env: Record<string, string | undefined>,
+		retry: RetrySettingsLike,
+		callbacks: unknown,
+		sessionId: string | undefined,
+	) => Promise<DelegatedCompaction>;
+	resolveAuth: () => Promise<{ apiKey?: unknown; headers?: Record<string, string> }>;
+	getRetrySettings: () => Partial<RetrySettingsLike> | undefined;
+}
+
+interface PreparationLike {
+	firstKeptEntryId: string;
+	messagesToSummarize: AgentMessage[];
+	turnPrefixMessages: AgentMessage[];
+	isSplitTurn: boolean;
+	tokensBefore: number;
+	previousSummary?: string;
+	fileOps?: FileOpsLike;
+	settings: { enabled: boolean; reserveTokens: number; keepRecentTokens: number };
+}
+
+interface ModelLike {
+	id: string;
+	provider?: string;
+	api?: string;
+	maxTokens?: number;
+	contextWindow?: number;
+	reasoning?: boolean;
+}
+
+export interface MiddleSummaryArgs {
+	preparation: PreparationLike;
+	model: ModelLike;
+	customInstructions?: string;
+	signal: AbortSignal;
+	thinkingLevel?: string;
+	env: Record<string, string | undefined>;
+	/** The middle summary this extension stored on the previous compaction. */
+	prior?: { priorMiddleSummary: string };
+	/** File lists carried by a previous version-2 marker. */
+	priorFileLists?: { readFiles?: readonly string[]; modifiedFiles?: readonly string[] };
+	/** Configured output-budget override; absent means the model's own limit. */
+	maxTokensCap?: number;
+	deps: DelegationDeps;
+}
+
+export interface MiddleSummary {
+	summary: string;
+	usage?: Usage;
+	readFiles: string[];
+	modifiedFiles: string[];
+}
+
+function toStringSet(value: unknown): Set<string> {
+	if (value instanceof Set) return new Set([...value].filter((v): v is string => typeof v === "string"));
+	if (Array.isArray(value)) return new Set(value.filter((v): v is string => typeof v === "string"));
+	return new Set();
+}
+
+function sortedUnique(values: Iterable<string>): string[] {
+	return [...new Set(values)].sort();
+}
+
+/**
+ * Summarize the middle span through the host's `compact()`, returning undefined for
+ * every stand-down so Pi's default compaction runs instead. Never throws.
+ */
+export async function summarizeMiddleSpan(args: MiddleSummaryArgs): Promise<MiddleSummary | undefined> {
+	const { preparation, model, deps } = args;
+
+	// Only OUR stored middle summary may seed the host's update path. The raw
+	// previousSummary of one of our compactions contains the verbatim head block,
+	// which must never be fed back through the summarizer.
+	const previousSummary =
+		args.prior && args.prior.priorMiddleSummary
+			? args.prior.priorMiddleSummary
+			: preparation.previousSummary;
+
+	// Pi skips hook-produced compactions when accumulating file lists, so the
+	// cumulative history is ours to carry. Written files merge into modified.
+	const read = new Set([...toStringSet(preparation.fileOps?.read), ...toStringSet(args.priorFileLists?.readFiles)]);
+	const edited = new Set([
+		...toStringSet(preparation.fileOps?.edited),
+		...toStringSet(preparation.fileOps?.written),
+		...toStringSet(args.priorFileLists?.modifiedFiles),
+	]);
+
+	const prepared = {
+		...preparation,
+		previousSummary,
+		fileOps: { read, written: new Set<string>(), edited },
+	};
+
+	// The host derives the output limit from the model (options.maxTokens is never
+	// set on its summarization path), so a configured override is applied as a
+	// model view. The session model itself is never mutated.
+	const modelView =
+		args.maxTokensCap !== undefined ? { ...model, maxTokens: args.maxTokensCap } : model;
+
+	let auth: { apiKey?: unknown; headers?: Record<string, string> } | undefined;
+	try {
+		auth = await deps.resolveAuth();
+	} catch {
+		return undefined;
+	}
+	const hasKey = typeof auth?.apiKey === "string" && auth.apiKey.length > 0;
+	const hasHeaders = !!auth?.headers && Object.keys(auth.headers).length > 0;
+	if (!hasKey && !hasHeaders) return undefined;
+
+	const retry: RetrySettingsLike = { ...DEFAULT_RETRY_SETTINGS, ...(deps.getRetrySettings() ?? {}) };
+
+	let result: DelegatedCompaction;
+	try {
+		result = await deps.compact(
+			prepared,
+			modelView,
+			auth?.apiKey,
+			auth?.headers ?? {},
+			args.customInstructions,
+			args.signal,
+			args.thinkingLevel,
+			undefined,
+			args.env,
+			retry,
+			undefined,
+			undefined,
+		);
+	} catch {
+		// The host throws on a failed or length-capped summarization
+		// ("Summarization failed: ..."); retry is already its policy, so a throw
+		// means the retries are spent and we stand down.
+		return undefined;
+	}
+
+	if (!result?.summary || !result.summary.trim()) return undefined;
+
+	return {
+		summary: result.summary,
+		usage: result.usage,
+		readFiles: sortedUnique(read),
+		modifiedFiles: sortedUnique(edited),
+	};
+}
+
+type DepsFactory = (
+	pi: ExtensionAPI,
+	ctx: { modelRegistry: unknown },
+	model: ModelLike,
+) => DelegationDeps;
+
+/** Production deps: the host function plus the host's own credential resolution. */
+function createHostDeps(pi: ExtensionAPI, ctx: { modelRegistry: unknown }, model: ModelLike): DelegationDeps {
+	return {
+		compact: compact as unknown as DelegationDeps["compact"],
+		resolveAuth: async () => {
+			const registry = ctx.modelRegistry as {
+				getApiKeyAndHeaders?: (model: unknown) => Promise<{ apiKey?: unknown; headers?: Record<string, string> }>;
+			};
+			if (!registry.getApiKeyAndHeaders) {
+				throw new Error("host model registry cannot resolve request credentials");
+			}
+			return await registry.getApiKeyAndHeaders(model);
+		},
+		getRetrySettings: () => pi.getSettings()?.retry,
+	};
+}
+
+let depsFactory: DepsFactory = createHostDeps;
+
+/** Test-only seam: swap the delegation deps (pass nothing to restore the host). */
+export function setDelegationDepsFactoryForTests(factory?: DepsFactory): void {
+	depsFactory = factory ?? createHostDeps;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -463,32 +651,20 @@ export default function (pi: ExtensionAPI) {
 		);
 
 		try {
-			const prompt = buildSummaryPrompt(
-				middleText || "(no new messages in this span)",
-				prior?.priorMiddleSummary ?? "",
-				prior === undefined ? prep.previousSummary : undefined,
-				prep.fileOps,
-			);
-			const response = await ctx.modelRegistry.complete(
+			const delegated = await summarizeMiddleSpan({
+				preparation: prep,
 				model,
-				{
-					messages: [
-						{
-							role: "user" as const,
-							content: [{ type: "text" as const, text: prompt }],
-							timestamp: Date.now(),
-						},
-					],
-				},
-				{ maxTokens: config.maxTokens, signal, cacheRetention: "none", sessionId: uuidv7() },
-			);
-			const middleSummary = response.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-			if (!middleSummary.trim()) {
+				...(event.customInstructions !== undefined ? { customInstructions: event.customInstructions } : {}),
+				signal,
+				...(ctx.thinkingLevel !== undefined ? { thinkingLevel: ctx.thinkingLevel } : {}),
+				env: process.env,
+				...(prior ? { prior: { priorMiddleSummary: prior.priorMiddleSummary } } : {}),
+				...(config.maxTokens !== undefined ? { maxTokensCap: config.maxTokens } : {}),
+				deps: depsFactory(pi, ctx, model),
+			});
+			if (!delegated) {
 				if (!signal.aborted) {
-					ctx.ui.notify("keep-head-compaction: empty summary, using default compaction", "warning");
+					ctx.ui.notify("keep-head-compaction: summarizer gave no usable summary, using default compaction", "warning");
 				}
 				return undefined;
 			}
@@ -500,7 +676,7 @@ export default function (pi: ExtensionAPI) {
 				"</verbatim-conversation-start>",
 				"",
 				"## Compacted middle history",
-				middleSummary,
+				delegated.summary,
 			].join("\n");
 
 			return {
@@ -508,12 +684,12 @@ export default function (pi: ExtensionAPI) {
 					summary,
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,
-					usage: response.usage,
+					usage: delegated.usage,
 					details: {
 						kind: DETAILS_KIND,
 						version: DETAILS_VERSION,
 						headText,
-						priorMiddleSummary: middleSummary,
+						priorMiddleSummary: delegated.summary,
 					} satisfies MarkerDetails,
 				},
 			};
