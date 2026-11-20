@@ -125,24 +125,35 @@
 
 ## 7. Live observation and release (release is Nelson's action)
 
-- [x] 7.1 Live RPC-host observation on pi 1.5.2 (driver
-      `/tmp/khc-live/run.mjs`, isolated `HOME` so the installed 0.1.0 copy cannot
-      hook, project `.pi/keep-head-compaction.json` with tiny budgets, model
-      `anthropic/claude-haiku-5-5`): the shipped extension loads in a real host,
-      the hook fires with the real preparation, and the stand-down path runs
-      end-to-end (`nothing to preserve and nothing to summarize`, then pi's own
-      compaction lands normally with its split-turn merge). **What it did NOT
-      reach:** a run where the middle span is non-empty, so the delegated
-      summarization never fired live. Cause, measured from the host: with
-      `keepRecentTokens` tiny (200-300) and short turns, the preparation arrives
-      with `messagesToSummarize: 0`, `turnPrefixMessages: 10`,
-      `isSplitTurn: true`, `tokensBefore: 3514` - pi put the whole conversation in
-      the current turn span, leaving no middle for us, and standing down is the
-      specified behavior. A live check of the delegation itself needs a session
-      whose spans are large relative to the budgets (few long turns, normal
-      `keepRecentTokens`), which is the remaining owed observation.
-- [ ] 7.2 Live observation of the owed item from thread 22: a real subagent
-      child's compaction shows the pinned head rather than a re-narration of it
+- [x] 7.1 Live host observation of the delegation on pi 1.5.2 - **reached and
+      passed**. Driver `/tmp/khc-inproc/inproc-run.mjs` (in-process
+      `createAgentSession` + `DefaultResourceLoader.additionalExtensionPaths` + an
+      observer extension; model `anthropic/claude-haiku-5-5`; project config
+      `headTokens 150, tailTokens 250, minMiddleTokens 30`; settings
+      `keepRecentTokens 250, reserveTokens 1000`; read tool enabled):
+      `session.compact("PROBE-FOCUS-STRING")` produced a compaction entry with
+      `details.kind = pi-keep-head-compaction`, `details.version = 2`,
+      `headText` 1316 chars, `readFiles ["alpha.txt","beta.txt"]`, and a summary
+      carrying the `<verbatim-conversation-start>` wrapper, the
+      `## Compacted middle history` section, **pi's own summary format** (its
+      `## Goal` / numbered-progress shape, which the extension no longer writes),
+      the `**Turn Context (split turn):**` merge, and `usage` from the host. A
+      second compaction after four more turns re-emitted the **byte-identical**
+      head (`HEAD IDENTICAL ACROSS COMPACTIONS: true`), grew the marker lists to
+      `["alpha.txt","beta.txt","gamma.txt"]`, and reported host usage. The
+      observer confirmed the hook received `customInstructions`
+      ("PROBE-FOCUS-STRING") and `span=18 prefix=1 isSplitTurn=true
+      tokensBefore=4242`.
+- [x] 7.2 Live role-scoped observation: the same driver with
+      `PI_SUBAGENT_CHILD=1` and config `headTokens 0` plus
+      `subagent { headTokens: 150 }` - a profile where a parent session stands
+      down - produced two compactions both bearing `kind =
+      pi-keep-head-compaction` `version 2` with a byte-identical carried head
+      (1422 chars) and the verbatim wrapper: the subagent budget was applied and
+      the head was pinned rather than re-narrated. (This used the documented
+      process-env signal in an in-process host, not a pi-subagents runner; a
+      runner-hosted child observation is still available as a cheap follow-up.)
+
 - [ ] 7.3 Create the npm trusted-publishing config for package
       `pi-keep-head-compaction`: publisher type GitHub Actions, organization
       `foomip`, repository `pi-keep-head-compaction`, workflow `release.yml`,

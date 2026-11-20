@@ -95,21 +95,42 @@ Probes were run in `/tmp/khp-probe` with a throwaway extension driven over RPC
   compaction reaches the RPC `compact` response without `usage`/`details`, which
   matches the host docs ("may be omitted by custom compaction handlers").
 
-### Live host observation (task 7.1, 2026-11-20, pi 1.5.2 host)
+### Live host observation (tasks 7.1-7.2, 2026-11-20, pi 1.5.2 host)
 
-Driven over RPC with an isolated `HOME` (so an installed 0.1.0 copy could not also
-hook) and a project config of tiny budgets. Two facts only a live run gives:
+Driver: `/tmp/khc-inproc/inproc-run.mjs` - an in-process `createAgentSession` with
+`DefaultResourceLoader.additionalExtensionPaths` loading the shipped extension, plus
+a second observer extension that logs the preparation. Model
+`anthropic/claude-haiku-5-5`; project config `headTokens 150, tailTokens 250,
+minMiddleTokens 30`; settings `keepRecentTokens 250, reserveTokens 1000`; read tool
+enabled. What the host actually produced:
+
+- `session.compact("PROBE-FOCUS-STRING")` wrote an entry with
+  `details.kind = pi-keep-head-compaction`, `details.version = 2`, `headText` 1316
+  chars and `readFiles ["alpha.txt","beta.txt"]`. The summary carried the verbatim
+  wrapper, the middle section in **pi's own summary format** (`## Goal` and a
+  numbered progress list - not the wording this extension used to force), the
+  `**Turn Context (split turn):**` merge, and host `usage`.
+- A second compaction, four turns later, re-emitted the **byte-identical** head and
+  grew the marker lists to `["alpha.txt","beta.txt","gamma.txt"]`, while the host
+  reported its own summarization usage. Cumulative file history therefore reached
+  the host's file blocks, not just our marker.
+- The observer logged the preparation the hook received: `span=18 prefix=1
+  isSplitTurn=true tokensBefore=4242 customInstructions="PROBE-FOCUS-STRING"`.
+- With `PI_SUBAGENT_CHILD=1` and config `headTokens 0` plus
+  `subagent { headTokens: 150 }` (a profile where a parent stands down), both
+  compactions carried our marker with a byte-identical 1422-character head: the
+  subagent budget applied and the head was pinned rather than re-narrated.
+
+Two facts worth keeping from the earlier RPC attempts, which failed for a
+different reason and explain why the in-process driver was needed:
 
 - pi 1.5.2 writes its own compaction entries with
-  `details: { readFiles, modifiedFiles }` and **no** `kind`. Our marker is keyed on
-  `kind`, so `findPriorMarker` ignores pi's entries and a session holding both kinds
-  keeps exactly one head.
-- With a tiny `keepRecentTokens` and short turns the preparation arrives as
-  `messagesToSummarize: 0`, `turnPrefixMessages: 10`, `isSplitTurn: true`,
-  `tokensBefore: 3514`: pi put the whole conversation in the current turn span, so no
-  middle is left for us, and standing down is the specified outcome. The delegated
-  summarization still owes a live observation on a session whose spans are larger
-  than the budgets; the unit suite is what pins that path today.
+  `details: { readFiles, modifiedFiles }` and **no** `kind`, so keying the marker on
+  `kind` keeps exactly one head even when pi's entries and ours coexist.
+- Driven over RPC with a very small `keepRecentTokens`, the preparation can arrive as
+  `messagesToSummarize: 0`, `turnPrefixMessages: 10`, `isSplitTurn: true`: pi placed
+  the whole conversation in the current turn span, no middle was left, and the
+  extension correctly stood down and let pi compact.
 
 ## Goals / Non-Goals
 
