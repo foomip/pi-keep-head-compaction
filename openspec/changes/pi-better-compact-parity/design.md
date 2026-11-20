@@ -45,6 +45,56 @@ package:
 - The event carries `customInstructions`, `reason` and `willRetry`
   (`core/extensions/types.d.ts:622-631`).
 
+## Measured Host Facts (task group 1, 2026-11-20, pi 1.5.2 host + pinned 1.4.0 dev deps)
+
+Probes were run in `/tmp/khp-probe` with a throwaway extension driven over RPC
+(4 turns, then a manual `compact` carrying `customInstructions`), against the local
+`wolverine/qwen3.8-flash-next` model. The probe is deleted; these are the results.
+
+- **1.1 exports and arity.** `compact` is exported at runtime from the package root in
+  both installed copies, with **`compact.length === 12`** matching the `.d.ts`
+  parameter list, and the identical function source in 1.4.0 and 1.5.2 (same
+  split-turn merge, same `_reserveTokens` "unused" comment). Also exported and
+  usable: `generateSummary`, `generateSummaryWithUsage`, `convertToLlm`,
+  `findCutPoint`, `estimateTokens`, `serializeConversation`, `SettingsManager`,
+  `DEFAULT_COMPACTION_SETTINGS`. **Not** exported at the root: `prepareCompaction`,
+  `completeSummarization`, `computeFileLists`, `formatFileOperations`,
+  `getSummarizationFailure`. So the single-seam choice in D1 is not a preference,
+  it is the only reachable surface plus `generateSummary*`.
+- **1.2 credentials from inside an extension (the D1 kill switch).** Passed.
+  `ctx.modelRegistry.getApiKeyAndHeaders(model)` resolved for the session model and
+  returned `{ ok, apiKey, headers, env }` with a 58-character apiKey and empty
+  header/env maps (the local provider uses a plain key). Handing those straight to
+  `compact()` produced a normal summarization call.
+- **1.3 retry settings reachability.** `ctx` has no settings accessor, but
+  **`pi.getSettings()` exists on the ExtensionAPI** and returns merged settings
+  (the probe read back its project `.pi/settings.json` compaction block). It returns
+  the raw document, so `retry` was `null` when unset rather than defaults; host
+  defaults live in `settings-defaults.js` (`retry: { enabled: true, maxRetries: 3,
+  baseDelayMs: 2000, maxAgentDelayMs: DEFAULT_MAX_AGENT_RETRY_DELAY_MS, provider: {
+  maxRetryDelayMs: 60000 } }`) and are **not** re-exported at the package root.
+  D7 therefore reads `pi.getSettings()?.retry` and supplies those literal defaults
+  itself when absent.
+- **1.4 the cap reaches the wire.** Confirmed, and the model view is the mechanism.
+  Ordinary agent requests for this model carried `max_completion_tokens=68601`
+  (= `model.maxTokens`, no explicit cap). Passing a summarization model view with
+  `maxTokens: 777` bounded the summary to 452 output tokens; a view with
+  `maxTokens: 48` produced the host's length failure. Options objects handed to the
+  request layer contain `signal, apiKey, headers, env, sessionId, reasoning,
+  cacheRetention` and never `maxTokens`, which is exactly why the view works.
+- **Correction to D7's failure handling (measured).** A failed or length-capped
+  summarization does **not** return sentinel text from `compact()`: it
+  **throws** `Summarization failed: ...` (`compaction.js:533-536`, via
+  `getSummarizationFailure`, which is not exported). So the stand-down rule is a
+  plain try/catch, not string sniffing.
+- **Bonus facts worth keeping.** The event carried `customInstructions`
+  ("PROBE-FOCUS"), `reason: "manual"`, `willRetry: false`, `isSplitTurn: true` with
+  `turnPrefixMessages: 1`, and `previousSummary: null` on the first compaction.
+  `before_provider_request` does **not** fire for summarization calls, so any usage
+  reporting must come from the `usage` that `compact()` returns (D9). A hook-returned
+  compaction reaches the RPC `compact` response without `usage`/`details`, which
+  matches the host docs ("may be omitted by custom compaction handlers").
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -172,14 +222,17 @@ pays there.
 ### D7 - Retry: reuse Pi's, don't build ours
 
 `compact()` takes `retry` and `callbacks`. Pass Pi's shaped retry settings
-(`{ enabled, maxRetries, baseDelayMs, maxAgentDelayMs }`, read from the host's
-settings manager where reachable) and treat a `compact()` result whose summary
-looks failed (Pi returns `"... failed: ..."` sentinel text on `stopReason`
-`error`/`length`) as a stand-down, exactly like today's empty-summary rule.
+(`{ enabled, maxRetries, baseDelayMs, maxAgentDelayMs }`) read from
+`pi.getSettings().retry`, falling back to Pi's own literal defaults
+(`enabled: true, maxRetries: 3, baseDelayMs: 2000, maxAgentDelayMs:` the host
+constant, `provider.maxRetryDelayMs: 60000`) because `getSettings()` returns the raw
+document and reports `retry: null` when unset. Those defaults are not re-exported at
+the package root, so they are restated here as literals and pinned by a test.
 
-If the host's settings manager is not reachable from the extension context, the
-fallback is Pi's documented defaults rather than a new config key, and the
-status command reports which was used. No new user-facing knob.
+A failed summarization is then handled as a stand-down by **catching the throw**:
+on `stopReason` `error` or `length`, `compact()` throws
+`Summarization failed: ...` rather than returning placeholder text, so there is no
+sentinel string to match. No new user-facing knob.
 
 ### D8 - `reason` and `willRetry` are observability, not policy
 

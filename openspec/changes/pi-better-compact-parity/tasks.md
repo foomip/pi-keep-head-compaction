@@ -2,24 +2,29 @@
 
 ## 1. Verify the host facts the design depends on (before any code)
 
-- [ ] 1.1 Confirm `compact` is importable at runtime from
-      `@earendil-works/pi-coding-agent` and that its parameter list matches
-      `dist/core/compaction/compaction.d.ts` (write a throwaway script that
-      imports and prints `compact.length`, run it with the installed host, then
-      delete it); record the measured arity in design.md so a future host change
-      is visible rather than silent
-- [ ] 1.2 Confirm `ModelRegistry.getApiKeyAndHeaders(model)` resolves for the
-      session model from inside an extension, with a real run of
-      `pi -e extensions/keep-head-compaction.ts` and `/compact` on a scratch
-      session; if it throws or returns empty credentials, stop here: the whole
-      delegation is not viable and design D1 needs revisiting
-- [ ] 1.3 Read how `settingsManager` is reachable from an extension context (or
-      confirm it is not) and record the answer against D7 in design.md,
-      including the fallback used
-- [ ] 1.4 Verify the D4 model-view cap actually reaches the request: run a
-      compaction with `maxTokens` configured low and assert the provider request
-      carries that cap (host logging or a stubbed stream function), and confirm
-      an unset value sends no cap
+- [x] 1.1 Measured: `compact.length === 12` from the package root in BOTH the
+      pinned 1.4.0 dev dependency and the installed 1.5.2 host, with identical
+      function source (same split-turn merge, same unused `_reserveTokens`). Also
+      recorded which neighbours are not root-exported (`prepareCompaction`,
+      `completeSummarization`, `computeFileLists`, `formatFileOperations`,
+      `getSummarizationFailure`), which is what makes D1's single seam the only
+      reachable surface besides `generateSummary*`. Recorded in design.md
+- [x] 1.2 Measured with a real compaction inside an extension:
+      `ctx.modelRegistry.getApiKeyAndHeaders(model)` returned
+      `{ ok, apiKey, headers, env }` (58-character key, empty header/env maps) and
+      `compact()` summarized normally with them. Delegation is viable; D1 stands
+- [x] 1.3 Measured: `ctx` exposes no settings accessor, but `pi.getSettings()` exists
+      on the ExtensionAPI and returns the merged document (project settings were
+      read back), with `retry: null` when unset. D7 amended to use
+      `pi.getSettings()?.retry` plus Pi's literal defaults, restated in design.md
+      because they are not root-exported
+- [x] 1.4 Measured live: ordinary agent requests carried
+      `max_completion_tokens=68601` (= `model.maxTokens`, no cap sent), a model view
+      with `maxTokens: 777` bounded the summary to 452 output tokens, and a view with
+      48 produced the host's length failure. Confirms the D4 model view reaches the
+      wire. Also corrected: a capped/failed summarization THROWS
+      `Summarization failed: ...` (`compaction.js:533-536`), so task 3.3 is a
+      try/catch, not sentinel-string matching
 
 ## 2. Failing tests for delegation (RED)
 
@@ -51,10 +56,11 @@
       2.1-2.3 now pass
 - [ ] 3.2 Apply the D4 model view (`{ ...model, maxTokens: cap }`) only when the
       config sets a cap; verify 2.2 passes and that an unset cap sends no budget
-- [ ] 3.3 Handle Pi's failed-summary sentinel text ("... failed: ..." from
-      `stopReason` `error`/`length`) as a stand-down alongside the existing
-      empty-summary rule, with no stand-down when the signal aborted; verify with
-      a test that a sentinel result returns `undefined`
+- [ ] 3.3 Wrap the delegated call in try/catch and treat a thrown
+      `Summarization failed: ...` (the host's `stopReason` `error`/`length` path,
+      measured in 1.4) as a stand-down alongside the existing empty-summary rule,
+      with no stand-down and no warning when the signal aborted; verify with a test
+      that a rejecting summarizer returns `undefined`
 - [ ] 3.4 Pass the retry settings resolved in 1.3 to `compact()` and confirm a
       first-attempt transient failure does not stand down while an exhausted
       retry does; verify with a test using a failing-then-succeeding fake
