@@ -13,16 +13,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.19 is the floor the package claims (engines.node) and the version pi
+        # itself declares; 26 is what the publish job runs on.
+        node-version: [22.19, 26]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 26
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm test
       - name: Coverage
+        if: matrix.node-version == 26
         run: npm run coverage
       - name: Summarize coverage
         if: always()

@@ -107,4 +107,39 @@
       (budgets and carried head, uncapped budget, stand-down reason); tests isolate
       `HOME` so the operator's own global config cannot leak into them
 
+## 6. Packaging, CI, spec sync
 
+- [x] 6.1 `package.json` is `0.2.0` and the dev dependencies are
+      `@earendil-works/pi-ai` / `pi-coding-agent` `^1.5.2`; `npm install` then
+      `npx tsc --noEmit` (clean) and `npm test` (52/0) ran against the 1.5.2 types,
+      with the installed tree reporting `1.5.2`
+- [x] 6.2 `.github/workflows/ci.yml` runs a matrix of Node `22.19` (the
+      `engines.node` floor, which is also what pi declares) and `26` (the publish
+      job's version); the coverage step is pinned to the 26 leg so the artifact is
+      written once. Both legs run `npm ci`, `npx tsc --noEmit` and `npm test`
+- [x] 6.3 The docs corrections this change's delta carries are verified:
+      `Tail retention` names `findCutPoint` (the drift the previous change flagged),
+      and `Role-scoped budgets` is split into `Subagent override merging` plus
+      `Role signal is the process environment` with its scenarios copied verbatim.
+      `openspec validate pi-better-compact-parity --strict` is clean
+
+## 7. Live observation and release (release is Nelson's action)
+
+- [ ] 7.1 Live RPC-host observation of the delegation on pi 1.5.2: the middle
+      summary is produced by the host's own summarizer, the head is carried
+      verbatim, and no output cap is applied when `maxTokens` is unset
+- [ ] 7.2 Live observation of the owed item from thread 22: a real subagent
+      child's compaction shows the pinned head rather than a re-narration of it
+- [ ] 7.3 Create the npm trusted-publishing config for package
+      `pi-keep-head-compaction`: publisher type GitHub Actions, organization
+      `foomip`, repository `pi-keep-head-compaction`, workflow `release.yml`,
+      "Allow npm publish" enabled; complete the first trusted publish within 2
+      days of creating it
+- [ ] 7.4 Tag `v0.2.0` on the merged `main` commit and push the tag, then verify
+      the run published with provenance: `npm view pi-keep-head-compaction@0.2.0`
+      shows the version and `dist.attestations`, and the `badges` branch numbers
+      refresh from the CI run
+- [ ] 7.5 Reinstall on each box (`pi update` or `pi install
+      npm:pi-keep-head-compaction`) and confirm the tuned global config on maui
+      (`headTokens 28000, tailTokens 12000, maxTokens 16284`) still resolves and
+      is now applied as an override rather than a fixed budget

@@ -43,9 +43,13 @@ windows. This extension hooks `session_before_compact` and:
 
 1. Splits the span-to-summarize into a **head** (first `keepHeadTokens`
    tokens, serialized verbatim) and a **middle**.
-2. Summarizes only the middle with the configured model, using the same
-   structured format as Pi's default summary (Goal, Progress, Key Decisions,
-   Next Steps, Critical Context) plus read/modified file lists.
+2. Summarizes only the middle by calling **Pi's own summarizer** - the
+   `compact()` function exported by `@earendil-works/pi-coding-agent` (Pi 1.4 or
+   newer) - on the preparation this extension just re-cut. That inherits Pi's
+   summary format (Goal, Summary, Details, and the Extended/Analysis blocks it
+   strips afterwards), its read/modified file blocks, its incremental-update path,
+   its split-turn merge, its no-cap-by-default output budget and its retry policy,
+   instead of a parallel implementation that has to chase Pi's changes.
 3. Returns a compaction whose summary is:
 
    ```
@@ -235,6 +239,19 @@ is performed.
 exceeds the model's context window, both budgets are scaled down
 proportionally (the head:tail ratio is preserved) to fit. An unknown context
 window uses the configured values as-is.
+
+**Follows the manual command.** `/compact focus on the auth refactor` passes those
+instructions straight to Pi's summarizer, and `/compact <text>` that cannot fit the
+window is refused by Pi before this extension is consulted.
+
+**Split turns and file history are Pi's.** When the cut lands mid-turn, Pi
+summarizes the turn prefix in a second call and merges it under
+`**Turn Context (split turn):**`; this extension no longer blends that prefix into
+its own prompt. Read/modified file lists accumulate in the marker (version 2),
+because Pi deliberately skips compaction entries produced by hooks when it gathers
+them - without that, file history would silently restart at each compaction. Older
+version 1 markers still work: their head is carried, with the file lists rebuilt
+from the current span.
 
 ## Behavior notes
 
