@@ -154,6 +154,14 @@
       process-env signal in an in-process host, not a pi-subagents runner; a
       runner-hosted child observation is still available as a cheap follow-up.)
 
+- [x] 7.0a Coverage measured on this tree (`npm run coverage`):
+      `extensions/keep-head-compaction.ts` **lines 87.77%, branches 82.38%,
+      functions 83.33%** - the 0.1.0 baseline for the same file was line 46.4% /
+      function 47.1%. The jump is the exported seams (`summarizeMiddleSpan`,
+      `buildStatusReport`, `readConfigLayers`/`mergedLayers`) being unit-testable
+      without the host. What stays uncovered is the host wiring only a live run
+      reaches (`createHostDeps` auth/retry paths, 561-579 and 680-711) - which is
+      exactly what tasks 7.1-7.2 exercised by hand.
 - [x] 7.0 PR opened: https://github.com/foomip/pi-keep-head-compaction/pull/1
       (`main` <- `feat/pi-better-compact-parity`). CI on the PR: `test (22.19)` pass
       20 s, `test (26)` pass 22 s, `publish-badges` skipping (it only runs on `main`)
