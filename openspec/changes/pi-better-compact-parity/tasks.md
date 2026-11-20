@@ -154,6 +154,9 @@
       process-env signal in an in-process host, not a pi-subagents runner; a
       runner-hosted child observation is still available as a cheap follow-up.)
 
+- [x] 7.0 PR opened: https://github.com/foomip/pi-keep-head-compaction/pull/1
+      (`main` <- `feat/pi-better-compact-parity`). CI on the PR: `test (22.19)` pass
+      20 s, `test (26)` pass 22 s, `publish-badges` skipping (it only runs on `main`)
 - [ ] 7.3 Create the npm trusted-publishing config for package
       `pi-keep-head-compaction`: publisher type GitHub Actions, organization
       `foomip`, repository `pi-keep-head-compaction`, workflow `release.yml`,
@@ -167,3 +170,9 @@
       npm:pi-keep-head-compaction`) and confirm the tuned global config on maui
       (`headTokens 28000, tailTokens 12000, maxTokens 16284`) still resolves and
       is now applied as an override rather than a fixed budget
+- [ ] 7.6 After the merge, archive this change (`openspec archive
+      pi-better-compact-parity --strict`) so the six MODIFIED and seven ADDED
+      requirements land in `openspec/specs/compaction/spec.md`, then re-run
+      `openspec validate --specs` and confirm no requirement trips the 500-character
+      info threshold
+
