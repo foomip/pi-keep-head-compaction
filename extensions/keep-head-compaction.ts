@@ -15,7 +15,7 @@
  * compaction entry's summary text (pi's cut-point model has a single
  * retention boundary, so this is the only way to retain both ends), and is
  * re-emitted unchanged on every subsequent compaction via the entry's
- * `details` field — repeated compactions never re-summarize or duplicate it.
+ * `details` field - repeated compactions never re-summarize or duplicate it.
  *
  * Configuration (optional), project overrides global, env overrides the head budget:
  *   - project:  <project>/.pi/keep-head-compaction.json
@@ -47,9 +47,10 @@
  * compaction runs instead.
  */
 
-import { uuidv7 } from "@earendil-works/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+	compact,
 	convertToLlm,
 	estimateTokens,
 	findCutPoint,
@@ -69,7 +70,7 @@ interface FileOpsLike {
 }
 
 const DETAILS_KIND = "pi-keep-head-compaction";
-const DETAILS_VERSION = 1;
+const DETAILS_VERSION = 2;
 const DEFAULT_KEEP_HEAD_TOKENS = 20000;
 /** Below this much middle content, stand down and let default compaction run. */
 const MIN_MIDDLE_TOKENS = 500;
@@ -86,7 +87,8 @@ interface ExtensionConfig {
 	headTokens: number;
 	tailTokens: number;
 	model?: string;
-	maxTokens: number;
+	/** Opt-in override of the summary output budget; unset means the model's own limit. */
+	maxTokens?: number;
 	minMiddleTokens: number;
 	subagent?: RoleOverrides;
 }
@@ -135,7 +137,7 @@ export function parseConfigObject(raw: unknown): ExtensionConfig {
 			DEFAULT_KEEP_HEAD_TOKENS,
 		tailTokens: parseNonNegativeInteger(merged.tailTokens) ?? DEFAULT_KEEP_HEAD_TOKENS,
 		model: parseModelOverride(merged.model),
-		maxTokens: parseNonNegativeInteger(merged.maxTokens) ?? 8192,
+		maxTokens: parseNonNegativeInteger(merged.maxTokens),
 		minMiddleTokens: parseNonNegativeInteger(merged.minMiddleTokens) ?? MIN_MIDDLE_TOKENS,
 		...(subagent !== undefined ? { subagent } : {}),
 	};
@@ -172,6 +174,9 @@ interface MarkerDetails {
 	version: number;
 	headText: string;
 	priorMiddleSummary: string;
+	/** Cumulative across compactions: pi skips hook-produced entries, so these are ours. */
+	readFiles: string[];
+	modifiedFiles: string[];
 }
 
 function readJsonConfig(configPath: string): Record<string, unknown> {
@@ -187,14 +192,37 @@ function readJsonConfig(configPath: string): Record<string, unknown> {
 }
 
 /** Project config wins over global, including nested `subagent` keys. */
-export function loadConfig(cwd: string, env: ConfigEnv = process.env): ExtensionConfig {
-	const project = readJsonConfig(path.join(cwd, ".pi", "keep-head-compaction.json"));
-	const home = readJsonConfig(
-		path.join(env.HOME ?? "", ".pi", "agent", "keep-head-compaction.json"),
-	);
-	const merged: Record<string, unknown> = { ...home, ...project };
-	const homeSubagent = home.subagent;
-	const projectSubagent = project.subagent;
+export interface ConfigLayers {
+	projectPath: string;
+	globalPath: string;
+	/** Files that actually contributed values, most specific first. */
+	sources: string[];
+	project: Record<string, unknown>;
+	global: Record<string, unknown>;
+}
+
+/** Read the config layers once, keeping track of which files contributed. */
+export function readConfigLayers(cwd: string, env: ConfigEnv = process.env): ConfigLayers {
+	const projectPath = path.join(cwd, ".pi", "keep-head-compaction.json");
+	const globalPath = path.join(env.HOME ?? "", ".pi", "agent", "keep-head-compaction.json");
+	const project = readJsonConfig(projectPath);
+	const global = readJsonConfig(globalPath);
+	return {
+		projectPath,
+		globalPath,
+		sources: [projectPath, globalPath].filter((_, i) =>
+			i === 0 ? Object.keys(project).length > 0 : Object.keys(global).length > 0,
+		),
+		project,
+		global,
+	};
+}
+
+/** Shallow-merge the layers, deep-merging only the `subagent` block. */
+export function mergedLayers(layers: ConfigLayers): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...layers.global, ...layers.project };
+	const homeSubagent = layers.global.subagent;
+	const projectSubagent = layers.project.subagent;
 	if (homeSubagent !== undefined || projectSubagent !== undefined) {
 		merged.subagent = {
 			...(typeof homeSubagent === "object" &&
@@ -209,7 +237,11 @@ export function loadConfig(cwd: string, env: ConfigEnv = process.env): Extension
 				: {}),
 		};
 	}
-	return parseConfigObject(merged);
+	return merged;
+}
+
+export function loadConfig(cwd: string, env: ConfigEnv = process.env): ExtensionConfig {
+	return parseConfigObject(mergedLayers(readConfigLayers(cwd, env)));
 }
 
 /**
@@ -236,7 +268,7 @@ function scaleBudgets(
  *
  * The head ends at the message that crosses the budget. A span that never
  * crosses the budget is the entire head (empty middle), and a zero budget
- * preserves nothing — both are deliberate outcomes, never silent head loss.
+ * preserves nothing - both are deliberate outcomes, never silent head loss.
  */
 export function splitHead(
 	messages: AgentMessage[],
@@ -272,7 +304,7 @@ export function formatCompactionNotice(notice: CompactionNotice): string {
 		notice.retainedHeadChars !== undefined
 			? `head=${notice.retainedHeadChars} chars carried from the earlier compaction`
 			: `head=${notice.headMessages} messages`;
-	return `keep-head-compaction: ${notice.role} profile: ${notice.headTokens}h/${notice.tailTokens}t — preserving ${head} + tail=${notice.tailTokens}t verbatim, summarizing ${notice.middleCount} middle messages`;
+	return `keep-head-compaction: ${notice.role} profile: ${notice.headTokens}h/${notice.tailTokens}t - preserving ${head} + tail=${notice.tailTokens}t verbatim, summarizing ${notice.middleCount} middle messages`;
 }
 
 /** Find the most recent compaction entry produced by this extension. */
@@ -284,10 +316,17 @@ function findPriorMarker(branchEntries: SessionEntry[]): MarkerDetails | undefin
 		if (details.kind === DETAILS_KIND && typeof details.headText === "string") {
 			return {
 				kind: DETAILS_KIND,
+				// Version 1 markers carry no file lists; they still carry the head.
 				version: DETAILS_VERSION,
 				headText: details.headText,
 				priorMiddleSummary:
 					typeof details.priorMiddleSummary === "string" ? details.priorMiddleSummary : "",
+				readFiles: Array.isArray(details.readFiles)
+					? details.readFiles.filter((f): f is string => typeof f === "string")
+					: [],
+				modifiedFiles: Array.isArray(details.modifiedFiles)
+					? details.modifiedFiles.filter((f): f is string => typeof f === "string")
+					: [],
 			};
 		}
 	}
@@ -323,40 +362,298 @@ function countMessageEntries(entries: SessionEntry[], from: number, to: number):
 	return count;
 }
 
-function buildSummaryPrompt(
-	middleText: string,
-	priorMiddleSummary: string,
-	foreignPreviousSummary: string | undefined,
-	fileOps: FileOpsLike,
-): string {
-	const priorState = priorMiddleSummary
-		? `An earlier compaction already produced the summary below. Merge it with the new conversation span: keep everything still relevant from it, and update it with the new span.\n\n<earlier-summary>\n${priorMiddleSummary}\n</earlier-summary>\n\n`
-		: foreignPreviousSummary
-			? `A previous compaction summary of the session follows. Merge it with the new conversation span below.\n\n<previous-summary>\n${foreignPreviousSummary}\n</previous-summary>\n\n`
-			: "";
-	const modified = [...new Set([...(fileOps.edited ?? []), ...(fileOps.written ?? [])])].sort();
-	const readFiles = [...new Set(fileOps.read ?? [])].sort();
-	const files =
-		readFiles.length + modified.length > 0
-			? `\nFiles read during this span:\n${readFiles.join("\n")}\n\nFiles modified during this span:\n${modified.join("\n")}\n`
-			: "";
-	return `You are a conversation summarizer for a coding agent. Summarize the middle span of a long session. The beginning and end of the session are preserved verbatim elsewhere, so focus ONLY on the span below.
+// ---------------------------------------------------------------------------
+// Middle summary: delegate to the host's own summarization pipeline.
+//
+// The extension decides WHAT survives compaction; Pi decides HOW the summarized
+// span is turned into prose. Calling the host function keeps the summary format,
+// the update path, the split-turn merge, the file blocks, the output-limit
+// behaviour and the retry policy from drifting away from the host again.
+// ---------------------------------------------------------------------------
 
-Capture:
-1. The main goals and objectives discussed
-2. Key decisions made and their rationale
-3. Important code changes, file modifications, or technical details
-4. Current state of any ongoing work
-5. Any blockers, issues, or open questions
-6. Next steps that were planned or suggested
+export interface RetrySettingsLike {
+	enabled: boolean;
+	maxRetries: number;
+	baseDelayMs: number;
+	maxAgentDelayMs: number;
+}
 
-Format the summary as structured markdown with sections: Goal, Constraints & Preferences, Progress (Done / In Progress / Blocked), Key Decisions, Next Steps, Critical Context.${files}
-${priorState}<conversation-span>
-${middleText}
-</conversation-span>`;
+/**
+ * Pi's own retry defaults (`settings-defaults.js`), which the package does not
+ * re-export at its root. `pi.getSettings().retry` reports what the user configured
+ * and nothing otherwise, so these literals are the fallback the host would apply.
+ */
+export const DEFAULT_RETRY_SETTINGS: RetrySettingsLike = {
+	enabled: true,
+	maxRetries: 3,
+	baseDelayMs: 2000,
+	maxAgentDelayMs: 60000,
+};
+
+export interface DelegatedCompaction {
+	summary: string;
+	firstKeptEntryId: string;
+	tokensBefore: number;
+	usage?: Usage;
+	details?: unknown;
+}
+
+export interface DelegationDeps {
+	compact: (
+		preparation: unknown,
+		model: unknown,
+		apiKey: unknown,
+		headers: Record<string, string> | undefined,
+		customInstructions: string | undefined,
+		signal: AbortSignal,
+		thinkingLevel: string | undefined,
+		streamFn: undefined,
+		env: Record<string, string | undefined>,
+		retry: RetrySettingsLike,
+		callbacks: unknown,
+		sessionId: string | undefined,
+	) => Promise<DelegatedCompaction>;
+	resolveAuth: () => Promise<{ apiKey?: unknown; headers?: Record<string, string> }>;
+	getRetrySettings: () => Partial<RetrySettingsLike> | undefined;
+}
+
+interface PreparationLike {
+	firstKeptEntryId: string;
+	messagesToSummarize: AgentMessage[];
+	turnPrefixMessages: AgentMessage[];
+	isSplitTurn: boolean;
+	tokensBefore: number;
+	previousSummary?: string;
+	fileOps?: FileOpsLike;
+	settings: { enabled: boolean; reserveTokens: number; keepRecentTokens: number };
+}
+
+interface ModelLike {
+	id: string;
+	provider?: string;
+	api?: string;
+	maxTokens?: number;
+	contextWindow?: number;
+	reasoning?: boolean;
+}
+
+export interface MiddleSummaryArgs {
+	preparation: PreparationLike;
+	model: ModelLike;
+	customInstructions?: string;
+	signal: AbortSignal;
+	thinkingLevel?: string;
+	env: Record<string, string | undefined>;
+	/** The middle summary this extension stored on the previous compaction. */
+	prior?: { priorMiddleSummary: string };
+	/** File lists carried by a previous version-2 marker. */
+	priorFileLists?: { readFiles?: readonly string[]; modifiedFiles?: readonly string[] };
+	/** Configured output-budget override; absent means the model's own limit. */
+	maxTokensCap?: number;
+	deps: DelegationDeps;
+}
+
+export interface MiddleSummary {
+	summary: string;
+	usage?: Usage;
+	readFiles: string[];
+	modifiedFiles: string[];
+}
+
+function toStringSet(value: unknown): Set<string> {
+	if (value instanceof Set) return new Set([...value].filter((v): v is string => typeof v === "string"));
+	if (Array.isArray(value)) return new Set(value.filter((v): v is string => typeof v === "string"));
+	return new Set();
+}
+
+function sortedUnique(values: Iterable<string>): string[] {
+	return [...new Set(values)].sort();
+}
+
+/**
+ * Summarize the middle span through the host's `compact()`, returning undefined for
+ * every stand-down so Pi's default compaction runs instead. Never throws.
+ */
+export async function summarizeMiddleSpan(args: MiddleSummaryArgs): Promise<MiddleSummary | undefined> {
+	const { preparation, model, deps } = args;
+
+	// Only OUR stored middle summary may seed the host's update path. The raw
+	// previousSummary of one of our compactions contains the verbatim head block,
+	// which must never be fed back through the summarizer.
+	const previousSummary =
+		args.prior && args.prior.priorMiddleSummary
+			? args.prior.priorMiddleSummary
+			: preparation.previousSummary;
+
+	// Pi skips hook-produced compactions when accumulating file lists, so the
+	// cumulative history is ours to carry. Written files merge into modified.
+	const read = new Set([...toStringSet(preparation.fileOps?.read), ...toStringSet(args.priorFileLists?.readFiles)]);
+	const edited = new Set([
+		...toStringSet(preparation.fileOps?.edited),
+		...toStringSet(preparation.fileOps?.written),
+		...toStringSet(args.priorFileLists?.modifiedFiles),
+	]);
+
+	const prepared = {
+		...preparation,
+		previousSummary,
+		fileOps: { read, written: new Set<string>(), edited },
+	};
+
+	// The host derives the output limit from the model (options.maxTokens is never
+	// set on its summarization path), so a configured override is applied as a
+	// model view. The session model itself is never mutated.
+	const modelView =
+		args.maxTokensCap !== undefined ? { ...model, maxTokens: args.maxTokensCap } : model;
+
+	let auth: { apiKey?: unknown; headers?: Record<string, string> } | undefined;
+	try {
+		auth = await deps.resolveAuth();
+	} catch {
+		return undefined;
+	}
+	const hasKey = typeof auth?.apiKey === "string" && auth.apiKey.length > 0;
+	const hasHeaders = !!auth?.headers && Object.keys(auth.headers).length > 0;
+	if (!hasKey && !hasHeaders) return undefined;
+
+	const retry: RetrySettingsLike = { ...DEFAULT_RETRY_SETTINGS, ...(deps.getRetrySettings() ?? {}) };
+
+	let result: DelegatedCompaction;
+	try {
+		result = await deps.compact(
+			prepared,
+			modelView,
+			auth?.apiKey,
+			auth?.headers ?? {},
+			args.customInstructions,
+			args.signal,
+			args.thinkingLevel,
+			undefined,
+			args.env,
+			retry,
+			undefined,
+			undefined,
+		);
+	} catch {
+		// The host throws on a failed or length-capped summarization
+		// ("Summarization failed: ..."); retry is already its policy, so a throw
+		// means the retries are spent and we stand down.
+		return undefined;
+	}
+
+	if (!result?.summary || !result.summary.trim()) return undefined;
+
+	return {
+		summary: result.summary,
+		usage: result.usage,
+		readFiles: sortedUnique(read),
+		modifiedFiles: sortedUnique(edited),
+	};
+}
+
+type DepsFactory = (
+	pi: ExtensionAPI,
+	ctx: { modelRegistry: unknown },
+	model: ModelLike,
+) => DelegationDeps;
+
+/** Production deps: the host function plus the host's own credential resolution. */
+function createHostDeps(pi: ExtensionAPI, ctx: { modelRegistry: unknown }, model: ModelLike): DelegationDeps {
+	return {
+		compact: compact as unknown as DelegationDeps["compact"],
+		resolveAuth: async () => {
+			const registry = ctx.modelRegistry as {
+				getApiKeyAndHeaders?: (model: unknown) => Promise<{ apiKey?: unknown; headers?: Record<string, string> }>;
+			};
+			if (!registry.getApiKeyAndHeaders) {
+				throw new Error("host model registry cannot resolve request credentials");
+			}
+			return await registry.getApiKeyAndHeaders(model);
+		},
+		// pi.getSettings() is an ExtensionAPI method on 1.5.x hosts; older hosts
+		// (and the 1.4 type surface) may not expose it, and the compaction must
+		// survive that: absent settings fall back to pi's own literals (D7).
+		getRetrySettings: () =>
+			typeof pi.getSettings === "function" ? pi.getSettings()?.retry : undefined,
+	};
+}
+
+let depsFactory: DepsFactory = createHostDeps;
+
+/** Test-only seam: swap the delegation deps (pass nothing to restore the host). */
+export function setDelegationDepsFactoryForTests(factory?: DepsFactory): void {
+	depsFactory = factory ?? createHostDeps;
+}
+
+/**
+ * Last outcome of this extension in the session, for `/keep-head-status`.
+ * Observability only: it never feeds back into the compaction decision.
+ */
+export interface ExtensionStatus {
+	role: SessionRole;
+	roleSignal: string;
+	configSources: string[];
+	headTokens: number;
+	tailTokens: number;
+	keepRecentTokens: number;
+	configuredHeadTokens: number;
+	configuredTailTokens: number;
+	messagesInSession: number;
+	headCarriedChars?: number;
+	headMessages?: number;
+	filesRead: number;
+	filesModified: number;
+	maxTokens?: number;
+	lastOutcome: string;
+}
+
+/** Mutable, per-extension-instance state for the status command. */
+interface StatusTracker {
+	lastOutcome: string;
+}
+
+export function buildStatusReport(
+	status: ExtensionStatus,
+	noticeSink = { lines: [] as string[] },
+): string[] {
+	const lines: string[] = [];
+	lines.push(`keep-head-compaction: role: ${status.role} (${status.roleSignal})`);
+	lines.push(`  config: ${status.configSources.length ? status.configSources.join(", ") : "defaults only"}`);
+	lines.push(
+		`  head budget: ${status.headTokens} tokens (configured ${status.configuredHeadTokens})`,
+	);
+	lines.push(
+		`  tail budget: ${status.tailTokens} tokens (configured ${status.configuredTailTokens}, pi keepRecentTokens ${status.keepRecentTokens})`,
+	);
+	if (status.headCarriedChars !== undefined) {
+		lines.push(
+			`  head: carried verbatim across compactions (${status.headCarriedChars} chars, re-emitted unchanged)`,
+		);
+	} else if (status.headMessages) {
+		lines.push(`  head: ${status.headMessages} messages still verbatim (no compaction yet)`);
+	} else {
+		lines.push("  head: not active");
+	}
+	lines.push(`  session: ${status.messagesInSession} entries`);
+	lines.push(`  files: ${status.filesRead} read, ${status.filesModified} modified (cumulative)`);
+	lines.push(
+		status.maxTokens === undefined
+			? "  summary output budget: model default (no cap)"
+			: `  summary output budget: ${status.maxTokens} tokens (cap)`,
+	);
+	lines.push(`  last outcome: ${status.lastOutcome}`);
+	noticeSink.lines.push(...lines);
+	return lines;
 }
 
 export default function (pi: ExtensionAPI) {
+	const statusTracker: StatusTracker = { lastOutcome: "no compaction decision taken yet" };
+	/** Record why the extension stood down, then return the stand-down value. */
+	function standDown(reason: string): undefined {
+		statusTracker.lastOutcome = `stood down: ${reason}`;
+		return undefined;
+	}
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		const { preparation, branchEntries, signal } = event;
 		const role = detectSessionRole();
@@ -373,7 +670,8 @@ export default function (pi: ExtensionAPI) {
 
 		// Documented opt-out: a zero head budget keeps no head, so hand back to
 		// pi's default compaction instead of summarizing a headless span.
-		if (headTokens <= 0) return undefined;
+		if (headTokens <= 0) return standDown("head budget is 0")
+
 
 		// tailTokens overrides pi's compaction.keepRecentTokens: re-cut the tail
 		// with pi's own cut-point logic and adjust the summarized span accordingly.
@@ -413,24 +711,25 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const prior = findPriorMarker(branchEntries);
-		const { head, middle } = prior
+		const { head, middle: middleSpan } = prior
 			? { head: [], middle: [...prep.messagesToSummarize] }
 			: splitHead(prep.messagesToSummarize, headTokens);
 
-		// Split-span prefix messages belong to the summarized middle.
-		const middleAll = [...middle, ...prep.turnPrefixMessages];
-		if (head.length === 0 && middleAll.length === 0) return undefined;
-		if (head.length === 0 && prior === undefined) return undefined; // nothing worth keeping verbatim
+		// A split turn's prefix stays with the host, which summarizes it with its own
+		// prompt and merges it under "Turn Context (split turn)". Folding it into the
+		// middle span here used to produce a summary shaped differently from pi's.
+
+		if (head.length === 0 && middleSpan.length === 0) return standDown("nothing to preserve and nothing to summarize");
+		if (head.length === 0 && prior === undefined) return standDown("no head found within the budget");
+
 		if (
 			prior === undefined &&
-			middleAll.reduce((sum, m) => sum + estimateTokens(m), 0) < config.minMiddleTokens
+			middleSpan.reduce((sum, m) => sum + estimateTokens(m), 0) < config.minMiddleTokens
 		) {
-			return undefined; // too little middle to compress; default compaction is a better fit
+			return standDown("middle smaller than minMiddleTokens");
 		}
 
 		const headText = prior ? prior.headText : serializeConversation(convertToLlm(head));
-		const middleText = serializeConversation(convertToLlm(middleAll));
-		if (!middleText.trim() && prior === undefined) return undefined;
 
 		// Summarizer: config.model override ("provider/model-id") or the session's current model.
 		let model = ctx.model;
@@ -447,7 +746,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!model) {
 			ctx.ui.notify("keep-head-compaction: no active model, using default compaction", "warning");
-			return undefined;
+			return standDown("no active model");
 		}
 
 		ctx.ui.notify(
@@ -457,40 +756,39 @@ export default function (pi: ExtensionAPI) {
 				tailTokens,
 				headMessages: head.length,
 				...(prior ? { retainedHeadChars: headText.length } : {}),
-				middleCount: middleAll.length,
+				middleCount: middleSpan.length,
 			}),
 			"info",
 		);
 
 		try {
-			const prompt = buildSummaryPrompt(
-				middleText || "(no new messages in this span)",
-				prior?.priorMiddleSummary ?? "",
-				prior === undefined ? prep.previousSummary : undefined,
-				prep.fileOps,
-			);
-			const response = await ctx.modelRegistry.complete(
+			// The verbatim head is ours, never the host's input: the span handed to the
+			// summarizer is the middle only. A split turn's prefix is left exactly as
+			// the host produced it, so it summarizes that part with its own prompt.
+			const delegated = await summarizeMiddleSpan({
+				preparation: { ...prep, messagesToSummarize: middleSpan },
 				model,
-				{
-					messages: [
-						{
-							role: "user" as const,
-							content: [{ type: "text" as const, text: prompt }],
-							timestamp: Date.now(),
-						},
-					],
-				},
-				{ maxTokens: config.maxTokens, signal, cacheRetention: "none", sessionId: uuidv7() },
-			);
-			const middleSummary = response.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-			if (!middleSummary.trim()) {
+				...(event.customInstructions !== undefined ? { customInstructions: event.customInstructions } : {}),
+				signal,
+				...(ctx.thinkingLevel !== undefined ? { thinkingLevel: ctx.thinkingLevel } : {}),
+				env: process.env,
+				...(prior ? { prior: { priorMiddleSummary: prior.priorMiddleSummary } } : {}),
+				...(prior
+					? {
+							priorFileLists: {
+								readFiles: prior.readFiles,
+								modifiedFiles: prior.modifiedFiles,
+							},
+						}
+					: {}),
+				...(config.maxTokens !== undefined ? { maxTokensCap: config.maxTokens } : {}),
+				deps: depsFactory(pi, ctx, model),
+			});
+			if (!delegated) {
 				if (!signal.aborted) {
-					ctx.ui.notify("keep-head-compaction: empty summary, using default compaction", "warning");
+					ctx.ui.notify("keep-head-compaction: summarizer gave no usable summary, using default compaction", "warning");
 				}
-				return undefined;
+				return standDown(signal.aborted ? "aborted during summarization" : "summarizer returned nothing usable");
 			}
 
 			const summary = [
@@ -500,27 +798,70 @@ export default function (pi: ExtensionAPI) {
 				"</verbatim-conversation-start>",
 				"",
 				"## Compacted middle history",
-				middleSummary,
+				delegated.summary,
 			].join("\n");
+
+			statusTracker.lastOutcome = `compacted: ${head.length ? `${head.length} head messages, ` : "head carried, "}${middleSpan.length} middle messages summarized`;
 
 			return {
 				compaction: {
 					summary,
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,
-					usage: response.usage,
+					usage: delegated.usage,
 					details: {
 						kind: DETAILS_KIND,
 						version: DETAILS_VERSION,
 						headText,
-						priorMiddleSummary: middleSummary,
+						priorMiddleSummary: delegated.summary,
+						readFiles: delegated.readFiles,
+						modifiedFiles: delegated.modifiedFiles,
 					} satisfies MarkerDetails,
 				},
 			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`keep-head-compaction failed: ${message} — using default compaction`, "error");
-			return undefined;
+			ctx.ui.notify(`keep-head-compaction failed: ${message} - using default compaction`, "error");
+			return standDown(`delegation threw: ${message}`);
 		}
+	});
+
+	pi.registerCommand("keep-head-status", {
+		description: "Report this extension's budgets, head status, file history and last outcome",
+		handler: async (_args, ctx) => {
+			const env = process.env;
+			const role = detectSessionRole(env);
+			const layers = readConfigLayers(ctx.cwd, env);
+			const config = resolveRoleConfig(parseConfigObject(mergedLayers(layers)), role);
+			const settings = typeof pi.getSettings === "function" ? pi.getSettings() : undefined;
+			const scaled = scaleBudgets(
+				config.headTokens,
+				config.tailTokens,
+				ctx.model?.contextWindow ?? 0,
+				settings?.compaction?.reserveTokens ?? 0,
+			);
+			const branch = ctx.sessionManager.getBranch();
+			const marker = findPriorMarker(branch);
+			const report = buildStatusReport({
+				role,
+				roleSignal:
+					role === "subagent" ? "PI_SUBAGENT_CHILD=1" : "PI_SUBAGENT_CHILD unset",
+				configSources: layers.sources.length
+					? layers.sources.map((f) => f.replace(env.HOME ?? "", "~"))
+					: ["defaults"],
+				headTokens: scaled.headTokens,
+				tailTokens: scaled.tailTokens,
+				configuredHeadTokens: config.headTokens,
+				configuredTailTokens: config.tailTokens,
+				keepRecentTokens: settings?.compaction?.keepRecentTokens ?? 0,
+				messagesInSession: ctx.sessionManager.getEntries().length,
+				...(marker ? { headCarriedChars: marker.headText.length } : {}),
+				filesRead: marker?.readFiles.length ?? 0,
+				filesModified: marker?.modifiedFiles.length ?? 0,
+				...(config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens }),
+				lastOutcome: statusTracker.lastOutcome,
+			});
+			ctx.ui.notify(report.join("\n"), "info");
+		},
 	});
 }

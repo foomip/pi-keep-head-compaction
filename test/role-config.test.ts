@@ -14,7 +14,6 @@ import {
 const BASE = {
 	headTokens: 20000,
 	tailTokens: 20000,
-	maxTokens: 8192,
 	minMiddleTokens: 500,
 };
 
@@ -63,13 +62,30 @@ test("an invalid subagent value degrades to absent", () => {
 	const config = parseConfigObject({ headTokens: 20000, subagent: { headTokens: "lots" } });
 
 	assert.equal(config.subagent?.headTokens, undefined);
-	assert.deepEqual(resolveRoleConfig(config, "subagent", {}), { ...BASE, model: undefined });
+	assert.deepEqual(resolveRoleConfig(config, "subagent", {}), {
+		...BASE,
+		model: undefined,
+		maxTokens: undefined,
+	});
 });
 
 test("a non-object subagent block is ignored", () => {
 	assert.equal(parseConfigObject({ subagent: "nope" }).subagent, undefined);
 	assert.equal(parseConfigObject({ subagent: [1, 2] }).subagent, undefined);
 	assert.equal(parseConfigObject({ subagent: 7 }).subagent, undefined);
+});
+
+test("maxTokens has no default: unset means the model governs the output budget", () => {
+	assert.equal(parseConfigObject({}).maxTokens, undefined);
+	assert.equal(resolveRoleConfig(parseConfigObject({}), "parent", {}).maxTokens, undefined);
+	// configured values still resolve, for parent and subagent alike
+	assert.equal(parseConfigObject({ maxTokens: 4096 }).maxTokens, 4096);
+	const child = resolveRoleConfig(
+		parseConfigObject({ maxTokens: 4096, subagent: { maxTokens: 1024 } }),
+		"subagent",
+		{},
+	);
+	assert.equal(child.maxTokens, 1024);
 });
 
 test("an absent subagent block stays absent", () => {
