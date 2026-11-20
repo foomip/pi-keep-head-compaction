@@ -178,6 +178,15 @@
       npm:pi-keep-head-compaction`) and confirm the tuned global config on maui
       (`headTokens 28000, tailTokens 12000, maxTokens 16284`) still resolves and
       is now applied as an override rather than a fixed budget
+- [x] 7.5a Pre-publish config check on the box that carries the tuned global
+      config (maui, `~/.pi/agent/keep-head-compaction.json`, installed copy still
+      0.1.0): importing the branch module and reading the real layers resolves
+      `headTokens 28000, tailTokens 12000, maxTokens 16284, minMiddleTokens 500` for
+      a parent and `12000/2000/250` for a child, and the status report prints
+      `summary output budget: 16284 tokens (cap)`. So the tuned config keeps working
+      unchanged; the only semantic change is for configs that **omit** `maxTokens`,
+      which used to be capped at 8192 and now follow the model's own output limit.
+      To adopt the uncapped behavior, delete the `maxTokens` key.
 - [ ] 7.6 After the merge, archive this change (`openspec archive
       pi-better-compact-parity --strict`) so the six MODIFIED and seven ADDED
       requirements land in `openspec/specs/compaction/spec.md`, then re-run
