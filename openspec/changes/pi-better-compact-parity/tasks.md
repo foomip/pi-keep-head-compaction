@@ -28,23 +28,27 @@
 
 ## 2. Failing tests for delegation (RED)
 
-- [ ] 2.1 Add `test/summarizer-delegation.test.ts` with an injected fake for the
-      delegated summarizer, and a RED test that `event.customInstructions`
-      reaches the summarizer verbatim; verify `npm test` fails on it and passes
-      the existing suites
-- [ ] 2.2 RED: with no `maxTokens` configured, no output budget is sent; with
-      `maxTokens: 4096` configured, the resolved model view carries 4096
-- [ ] 2.3 RED: after a head-keeping compaction, the summarizer receives the
-      stored **middle** summary as `previousSummary` and never the wrapped head
-      text; and a session whose previous compaction was Pi's still receives
-      `preparation.previousSummary`
-- [ ] 2.4 RED: `isSplitTurn` preparations are handed to the delegated call
-      unmodified, with `turnPrefixMessages` no longer folded into the middle
-      span
-- [ ] 2.5 RED: the emitted `<read-files>` / `<modified-files>` blocks union the
-      prior marker's lists with the current span's, de-duplicated and sorted, and
-      a v1 marker (no lists) still yields the carried head plus current-span
-      lists
+- [x] 2.1 Added `test/summarizer-delegation.test.ts` with an injected fake for
+      the delegated call (no extension host driven, per AGENTS.md) and RED tests
+      that `event.customInstructions` reaches the summarizer verbatim, plus one
+      asserting nothing is invented when the event carried none. Measured RED:
+      `npm test` = 32 tests, **31 pass, 1 fail**; the new file fails at import
+      with `does not provide an export named 'summarizeMiddleSpan'` - the seam in
+      D11 does not exist yet, which is the intended failure
+- [x] 2.2 RED: no output budget when `maxTokens` is unset (the model is handed
+      through with its own limit, unmutated) and the configured cap reaches the
+      delegated call via a model view without touching the session model object
+- [x] 2.3 RED: after a head-keeping compaction the summarizer receives the stored
+      **middle** summary as `previousSummary`, with the
+      `<verbatim-conversation-start>` block explicitly excluded, and a session
+      whose previous compaction was Pi's keeps `preparation.previousSummary`
+- [x] 2.4 RED: an `isSplitTurn` preparation is handed over untouched - the turn
+      prefix stays in `turnPrefixMessages` and never joins `messagesToSummarize`
+- [x] 2.5 RED: the file blocks union the prior marker's lists with the current
+      span's, de-duplicated and sorted, and a v1 marker (no lists) leaves the span
+      standing alone. Also pinned: the host retry settings are handed to the
+      delegate, the delegate is called **once** (retry belongs to the host policy,
+      measured in 1.3/1.4), and a thrown `Summarization failed: ...` stands down
 
 ## 3. Green: delegate the middle summary
 

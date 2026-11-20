@@ -234,6 +234,34 @@ on `stopReason` `error` or `length`, `compact()` throws
 `Summarization failed: ...` rather than returning placeholder text, so there is no
 sentinel string to match. No new user-facing knob.
 
+### D11 - The seam the tests pin: an exported `summarizeMiddleSpan`
+
+The delegation lives behind one exported function so the unit tests can inject a
+fake for it without driving the extension host (AGENTS.md requires testing
+exported pure helpers directly):
+
+```ts
+summarizeMiddleSpan({
+  preparation,      // already re-cut by the tail logic
+  model,            // session model; the cap is applied via a view, never mutated
+  customInstructions, signal, thinkingLevel, env,
+  prior?,           // { priorMiddleSummary } when our marker exists
+  priorFileLists?,  // { readFiles, modifiedFiles } from a v2 marker
+  maxTokensCap?,    // configured override; undefined = no cap
+  deps,             // { compact, resolveAuth, getRetrySettings }
+}): Promise<{ summary, usage, readFiles, modifiedFiles } | undefined>
+```
+
+- `deps.compact` is the host function; `resolveAuth` wraps
+  `ctx.modelRegistry.getApiKeyAndHeaders`; `getRetrySettings` wraps
+  `pi.getSettings().retry` with the D7 literals as fallback. Injecting them keeps
+  the function pure enough to test and keeps the host bindings in one place.
+- It returns `undefined` for every stand-down (thrown summarization, empty
+  summary), and the handler then falls back exactly as it does today.
+- **No extension-level retry.** The delegate is called once and the retry policy is
+  handed to it, because the host retries inside `compact()` already; a second
+  retry loop on top would multiply provider calls for no benefit. Pinned by test.
+
 ### D8 - `reason` and `willRetry` are observability, not policy
 
 Both go into the compaction notice and the status line. Deliberately no policy
