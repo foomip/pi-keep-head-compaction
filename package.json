@@ -1,6 +1,6 @@
 {
   "name": "pi-keep-head-compaction",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi coding agent extension: keep the first N tokens of the conversation verbatim (in addition to the recent tail) when compaction summarizes the middle",
   "license": "MIT",
   "author": "Nelson Pascoal",
@@ -34,8 +34,8 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.5.2",
-    "@earendil-works/pi-coding-agent": "^1.5.2",
+    "@earendil-works/pi-ai": "^1.6.0",
+    "@earendil-works/pi-coding-agent": "^1.6.0",
     "typescript": "^5.7.0"
   },
   "engines": {
